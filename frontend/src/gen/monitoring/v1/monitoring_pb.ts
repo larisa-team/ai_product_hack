@@ -53,11 +53,30 @@ proto3.util.setEnumType(RunState, "monitoring.v1.RunState", [
 ]);
 
 /**
+ * @generated from enum monitoring.v1.FilterType
+ */
+export enum FilterType {
+  /**
+   * @generated from enum value: PROMT_BASED = 0;
+   */
+  PROMT_BASED = 0,
+}
+// Retrieve enum metadata with: proto3.getEnumType(FilterType)
+proto3.util.setEnumType(FilterType, "monitoring.v1.FilterType", [
+  { no: 0, name: "PROMT_BASED" },
+]);
+
+/**
  * @generated from message monitoring.v1.ProjectFilter
  */
 export class ProjectFilter extends Message<ProjectFilter> {
   /**
-   * @generated from field: string prompt = 1;
+   * @generated from field: monitoring.v1.FilterType type = 1;
+   */
+  type = FilterType.PROMT_BASED;
+
+  /**
+   * @generated from field: string prompt = 2;
    */
   prompt = "";
 
@@ -69,7 +88,8 @@ export class ProjectFilter extends Message<ProjectFilter> {
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "monitoring.v1.ProjectFilter";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "prompt", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 1, name: "type", kind: "enum", T: proto3.getEnumType(FilterType) },
+    { no: 2, name: "prompt", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ProjectFilter {

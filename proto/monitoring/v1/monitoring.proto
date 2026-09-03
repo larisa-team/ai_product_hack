@@ -22,12 +22,17 @@ enum RunState {
   RUN_STATE_DONE = 2;
 }
 
+enum FilterType {
+  PROMT_BASED = 0;
+}
+
 // =====================================================
 // Проекты
 // =====================================================
 
 message ProjectFilter {
-  string prompt = 1;
+  FilterType type = 1;
+  string prompt = 2;
 }
 
 message Source {

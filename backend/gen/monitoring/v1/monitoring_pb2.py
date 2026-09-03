@@ -26,7 +26,7 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from google.protobuf import field_mask_pb2 as google_dot_protobuf_dot_field__mask__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1emonitoring/v1/monitoring.proto\x12\rmonitoring.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a google/protobuf/field_mask.proto\"\x1f\n\rProjectFilter\x12\x0e\n\x06prompt\x18\x01 \x01(\t\"C\n\x06Source\x12\'\n\x04type\x18\x01 \x01(\x0e\x32\x19.monitoring.v1.SourceType\x12\x10\n\x08telegram\x18\x02 \x01(\t\"\xe9\x01\n\x07Project\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\r\n\x05topic\x18\x03 \x01(\t\x12-\n\x07\x66ilters\x18\x04 \x03(\x0b\x32\x1c.monitoring.v1.ProjectFilter\x12&\n\x07sources\x18\x05 \x03(\x0b\x32\x15.monitoring.v1.Source\x12.\n\ncreated_at\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12.\n\nupdated_at\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\"\x8a\x01\n\x14\x43reateProjectRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05topic\x18\x02 \x01(\t\x12-\n\x07\x66ilters\x18\x03 \x03(\x0b\x32\x1c.monitoring.v1.ProjectFilter\x12&\n\x07sources\x18\x04 \x03(\x0b\x32\x15.monitoring.v1.Source\"@\n\x15\x43reateProjectResponse\x12\'\n\x07project\x18\x01 \x01(\x0b\x32\x16.monitoring.v1.Project\"\x1f\n\x11GetProjectRequest\x12\n\n\x02id\x18\x01 \x01(\t\"=\n\x12GetProjectResponse\x12\'\n\x07project\x18\x01 \x01(\x0b\x32\x16.monitoring.v1.Project\"@\n\x15UpdateProjectResponse\x12\'\n\x07project\x18\x01 \x01(\x0b\x32\x16.monitoring.v1.Project\"\x17\n\x15\x44\x65leteProjectResponse\"<\n\x13ListProjectsRequest\x12\x11\n\tpage_size\x18\x01 \x01(\x05\x12\x12\n\npage_token\x18\x02 \x01(\t\"Y\n\x14ListProjectsResponse\x12(\n\x08projects\x18\x01 \x03(\x0b\x32\x16.monitoring.v1.Project\x12\x17\n\x0fnext_page_token\x18\x02 \x01(\t\"\xc7\x01\n\x14UpdateProjectRequest\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\r\n\x05topic\x18\x03 \x01(\t\x12-\n\x07\x66ilters\x18\x04 \x03(\x0b\x32\x1c.monitoring.v1.ProjectFilter\x12&\n\x07sources\x18\x05 \x03(\x0b\x32\x15.monitoring.v1.Source\x12/\n\x0bupdate_mask\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.FieldMask\"\"\n\x14\x44\x65leteProjectRequest\x12\n\n\x02id\x18\x01 \x01(\t\"7\n\x04News\x12\r\n\x05title\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\x12\x0f\n\x07sources\x18\x03 \x03(\t\"\xa0\x01\n\x03Run\x12\n\n\x02id\x18\x01 \x01(\t\x12\x12\n\nproject_id\x18\x02 \x01(\t\x12.\n\ncreated_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12!\n\x04news\x18\x04 \x03(\x0b\x32\x13.monitoring.v1.News\x12&\n\x05state\x18\x05 \x01(\x0e\x32\x17.monitoring.v1.RunState\"%\n\x0fStartRunRequest\x12\x12\n\nproject_id\x18\x01 \x01(\t\"3\n\x10StartRunResponse\x12\x1f\n\x03run\x18\x01 \x01(\x0b\x32\x12.monitoring.v1.Run\"\x1b\n\rGetRunRequest\x12\n\n\x02id\x18\x01 \x01(\t\"1\n\x0eGetRunResponse\x12\x1f\n\x03run\x18\x01 \x01(\x0b\x32\x12.monitoring.v1.Run\"L\n\x0fListRunsRequest\x12\x12\n\nproject_id\x18\x01 \x01(\t\x12\x11\n\tpage_size\x18\x02 \x01(\x05\x12\x12\n\npage_token\x18\x03 \x01(\t\"M\n\x10ListRunsResponse\x12 \n\x04runs\x18\x01 \x03(\x0b\x32\x12.monitoring.v1.Run\x12\x17\n\x0fnext_page_token\x18\x02 \x01(\t*C\n\nSourceType\x12\x1b\n\x17SOURCE_TYPE_UNSPECIFIED\x10\x00\x12\x18\n\x14SOURCE_TYPE_TELEGRAM\x10\x01*P\n\x08RunState\x12\x19\n\x15RUN_STATE_UNSPECIFIED\x10\x00\x12\x15\n\x11RUN_STATE_STARTED\x10\x01\x12\x12\n\x0eRUN_STATE_DONE\x10\x02\x32\xd0\x03\n\x0eProjectService\x12Z\n\rCreateProject\x12#.monitoring.v1.CreateProjectRequest\x1a$.monitoring.v1.CreateProjectResponse\x12Q\n\nGetProject\x12 .monitoring.v1.GetProjectRequest\x1a!.monitoring.v1.GetProjectResponse\x12W\n\x0cListProjects\x12\".monitoring.v1.ListProjectsRequest\x1a#.monitoring.v1.ListProjectsResponse\x12Z\n\rUpdateProject\x12#.monitoring.v1.UpdateProjectRequest\x1a$.monitoring.v1.UpdateProjectResponse\x12Z\n\rDeleteProject\x12#.monitoring.v1.DeleteProjectRequest\x1a$.monitoring.v1.DeleteProjectResponse2\xed\x01\n\nRunService\x12K\n\x08StartRun\x12\x1e.monitoring.v1.StartRunRequest\x1a\x1f.monitoring.v1.StartRunResponse\x12\x45\n\x06GetRun\x12\x1c.monitoring.v1.GetRunRequest\x1a\x1d.monitoring.v1.GetRunResponse\x12K\n\x08ListRuns\x12\x1e.monitoring.v1.ListRunsRequest\x1a\x1f.monitoring.v1.ListRunsResponseB Z\x1egen/monitoring/v1;monitoringv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1emonitoring/v1/monitoring.proto\x12\rmonitoring.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a google/protobuf/field_mask.proto\"H\n\rProjectFilter\x12\'\n\x04type\x18\x01 \x01(\x0e\x32\x19.monitoring.v1.FilterType\x12\x0e\n\x06prompt\x18\x02 \x01(\t\"C\n\x06Source\x12\'\n\x04type\x18\x01 \x01(\x0e\x32\x19.monitoring.v1.SourceType\x12\x10\n\x08telegram\x18\x02 \x01(\t\"\xe9\x01\n\x07Project\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\r\n\x05topic\x18\x03 \x01(\t\x12-\n\x07\x66ilters\x18\x04 \x03(\x0b\x32\x1c.monitoring.v1.ProjectFilter\x12&\n\x07sources\x18\x05 \x03(\x0b\x32\x15.monitoring.v1.Source\x12.\n\ncreated_at\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12.\n\nupdated_at\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\"\x8a\x01\n\x14\x43reateProjectRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05topic\x18\x02 \x01(\t\x12-\n\x07\x66ilters\x18\x03 \x03(\x0b\x32\x1c.monitoring.v1.ProjectFilter\x12&\n\x07sources\x18\x04 \x03(\x0b\x32\x15.monitoring.v1.Source\"@\n\x15\x43reateProjectResponse\x12\'\n\x07project\x18\x01 \x01(\x0b\x32\x16.monitoring.v1.Project\"\x1f\n\x11GetProjectRequest\x12\n\n\x02id\x18\x01 \x01(\t\"=\n\x12GetProjectResponse\x12\'\n\x07project\x18\x01 \x01(\x0b\x32\x16.monitoring.v1.Project\"@\n\x15UpdateProjectResponse\x12\'\n\x07project\x18\x01 \x01(\x0b\x32\x16.monitoring.v1.Project\"\x17\n\x15\x44\x65leteProjectResponse\"<\n\x13ListProjectsRequest\x12\x11\n\tpage_size\x18\x01 \x01(\x05\x12\x12\n\npage_token\x18\x02 \x01(\t\"Y\n\x14ListProjectsResponse\x12(\n\x08projects\x18\x01 \x03(\x0b\x32\x16.monitoring.v1.Project\x12\x17\n\x0fnext_page_token\x18\x02 \x01(\t\"\xc7\x01\n\x14UpdateProjectRequest\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\r\n\x05topic\x18\x03 \x01(\t\x12-\n\x07\x66ilters\x18\x04 \x03(\x0b\x32\x1c.monitoring.v1.ProjectFilter\x12&\n\x07sources\x18\x05 \x03(\x0b\x32\x15.monitoring.v1.Source\x12/\n\x0bupdate_mask\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.FieldMask\"\"\n\x14\x44\x65leteProjectRequest\x12\n\n\x02id\x18\x01 \x01(\t\"7\n\x04News\x12\r\n\x05title\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\x12\x0f\n\x07sources\x18\x03 \x03(\t\"\xa0\x01\n\x03Run\x12\n\n\x02id\x18\x01 \x01(\t\x12\x12\n\nproject_id\x18\x02 \x01(\t\x12.\n\ncreated_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12!\n\x04news\x18\x04 \x03(\x0b\x32\x13.monitoring.v1.News\x12&\n\x05state\x18\x05 \x01(\x0e\x32\x17.monitoring.v1.RunState\"%\n\x0fStartRunRequest\x12\x12\n\nproject_id\x18\x01 \x01(\t\"3\n\x10StartRunResponse\x12\x1f\n\x03run\x18\x01 \x01(\x0b\x32\x12.monitoring.v1.Run\"\x1b\n\rGetRunRequest\x12\n\n\x02id\x18\x01 \x01(\t\"1\n\x0eGetRunResponse\x12\x1f\n\x03run\x18\x01 \x01(\x0b\x32\x12.monitoring.v1.Run\"L\n\x0fListRunsRequest\x12\x12\n\nproject_id\x18\x01 \x01(\t\x12\x11\n\tpage_size\x18\x02 \x01(\x05\x12\x12\n\npage_token\x18\x03 \x01(\t\"M\n\x10ListRunsResponse\x12 \n\x04runs\x18\x01 \x03(\x0b\x32\x12.monitoring.v1.Run\x12\x17\n\x0fnext_page_token\x18\x02 \x01(\t*C\n\nSourceType\x12\x1b\n\x17SOURCE_TYPE_UNSPECIFIED\x10\x00\x12\x18\n\x14SOURCE_TYPE_TELEGRAM\x10\x01*P\n\x08RunState\x12\x19\n\x15RUN_STATE_UNSPECIFIED\x10\x00\x12\x15\n\x11RUN_STATE_STARTED\x10\x01\x12\x12\n\x0eRUN_STATE_DONE\x10\x02*\x1d\n\nFilterType\x12\x0f\n\x0bPROMT_BASED\x10\x00\x32\xd0\x03\n\x0eProjectService\x12Z\n\rCreateProject\x12#.monitoring.v1.CreateProjectRequest\x1a$.monitoring.v1.CreateProjectResponse\x12Q\n\nGetProject\x12 .monitoring.v1.GetProjectRequest\x1a!.monitoring.v1.GetProjectResponse\x12W\n\x0cListProjects\x12\".monitoring.v1.ListProjectsRequest\x1a#.monitoring.v1.ListProjectsResponse\x12Z\n\rUpdateProject\x12#.monitoring.v1.UpdateProjectRequest\x1a$.monitoring.v1.UpdateProjectResponse\x12Z\n\rDeleteProject\x12#.monitoring.v1.DeleteProjectRequest\x1a$.monitoring.v1.DeleteProjectResponse2\xed\x01\n\nRunService\x12K\n\x08StartRun\x12\x1e.monitoring.v1.StartRunRequest\x1a\x1f.monitoring.v1.StartRunResponse\x12\x45\n\x06GetRun\x12\x1c.monitoring.v1.GetRunRequest\x1a\x1d.monitoring.v1.GetRunResponse\x12K\n\x08ListRuns\x12\x1e.monitoring.v1.ListRunsRequest\x1a\x1f.monitoring.v1.ListRunsResponseB Z\x1egen/monitoring/v1;monitoringv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,54 +34,56 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'monitoring.v1.monitoring_pb
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z\036gen/monitoring/v1;monitoringv1'
-  _globals['_SOURCETYPE']._serialized_start=1788
-  _globals['_SOURCETYPE']._serialized_end=1855
-  _globals['_RUNSTATE']._serialized_start=1857
-  _globals['_RUNSTATE']._serialized_end=1937
+  _globals['_SOURCETYPE']._serialized_start=1829
+  _globals['_SOURCETYPE']._serialized_end=1896
+  _globals['_RUNSTATE']._serialized_start=1898
+  _globals['_RUNSTATE']._serialized_end=1978
+  _globals['_FILTERTYPE']._serialized_start=1980
+  _globals['_FILTERTYPE']._serialized_end=2009
   _globals['_PROJECTFILTER']._serialized_start=116
-  _globals['_PROJECTFILTER']._serialized_end=147
-  _globals['_SOURCE']._serialized_start=149
-  _globals['_SOURCE']._serialized_end=216
-  _globals['_PROJECT']._serialized_start=219
-  _globals['_PROJECT']._serialized_end=452
-  _globals['_CREATEPROJECTREQUEST']._serialized_start=455
-  _globals['_CREATEPROJECTREQUEST']._serialized_end=593
-  _globals['_CREATEPROJECTRESPONSE']._serialized_start=595
-  _globals['_CREATEPROJECTRESPONSE']._serialized_end=659
-  _globals['_GETPROJECTREQUEST']._serialized_start=661
-  _globals['_GETPROJECTREQUEST']._serialized_end=692
-  _globals['_GETPROJECTRESPONSE']._serialized_start=694
-  _globals['_GETPROJECTRESPONSE']._serialized_end=755
-  _globals['_UPDATEPROJECTRESPONSE']._serialized_start=757
-  _globals['_UPDATEPROJECTRESPONSE']._serialized_end=821
-  _globals['_DELETEPROJECTRESPONSE']._serialized_start=823
-  _globals['_DELETEPROJECTRESPONSE']._serialized_end=846
-  _globals['_LISTPROJECTSREQUEST']._serialized_start=848
-  _globals['_LISTPROJECTSREQUEST']._serialized_end=908
-  _globals['_LISTPROJECTSRESPONSE']._serialized_start=910
-  _globals['_LISTPROJECTSRESPONSE']._serialized_end=999
-  _globals['_UPDATEPROJECTREQUEST']._serialized_start=1002
-  _globals['_UPDATEPROJECTREQUEST']._serialized_end=1201
-  _globals['_DELETEPROJECTREQUEST']._serialized_start=1203
-  _globals['_DELETEPROJECTREQUEST']._serialized_end=1237
-  _globals['_NEWS']._serialized_start=1239
-  _globals['_NEWS']._serialized_end=1294
-  _globals['_RUN']._serialized_start=1297
-  _globals['_RUN']._serialized_end=1457
-  _globals['_STARTRUNREQUEST']._serialized_start=1459
-  _globals['_STARTRUNREQUEST']._serialized_end=1496
-  _globals['_STARTRUNRESPONSE']._serialized_start=1498
-  _globals['_STARTRUNRESPONSE']._serialized_end=1549
-  _globals['_GETRUNREQUEST']._serialized_start=1551
-  _globals['_GETRUNREQUEST']._serialized_end=1578
-  _globals['_GETRUNRESPONSE']._serialized_start=1580
-  _globals['_GETRUNRESPONSE']._serialized_end=1629
-  _globals['_LISTRUNSREQUEST']._serialized_start=1631
-  _globals['_LISTRUNSREQUEST']._serialized_end=1707
-  _globals['_LISTRUNSRESPONSE']._serialized_start=1709
-  _globals['_LISTRUNSRESPONSE']._serialized_end=1786
-  _globals['_PROJECTSERVICE']._serialized_start=1940
-  _globals['_PROJECTSERVICE']._serialized_end=2404
-  _globals['_RUNSERVICE']._serialized_start=2407
-  _globals['_RUNSERVICE']._serialized_end=2644
+  _globals['_PROJECTFILTER']._serialized_end=188
+  _globals['_SOURCE']._serialized_start=190
+  _globals['_SOURCE']._serialized_end=257
+  _globals['_PROJECT']._serialized_start=260
+  _globals['_PROJECT']._serialized_end=493
+  _globals['_CREATEPROJECTREQUEST']._serialized_start=496
+  _globals['_CREATEPROJECTREQUEST']._serialized_end=634
+  _globals['_CREATEPROJECTRESPONSE']._serialized_start=636
+  _globals['_CREATEPROJECTRESPONSE']._serialized_end=700
+  _globals['_GETPROJECTREQUEST']._serialized_start=702
+  _globals['_GETPROJECTREQUEST']._serialized_end=733
+  _globals['_GETPROJECTRESPONSE']._serialized_start=735
+  _globals['_GETPROJECTRESPONSE']._serialized_end=796
+  _globals['_UPDATEPROJECTRESPONSE']._serialized_start=798
+  _globals['_UPDATEPROJECTRESPONSE']._serialized_end=862
+  _globals['_DELETEPROJECTRESPONSE']._serialized_start=864
+  _globals['_DELETEPROJECTRESPONSE']._serialized_end=887
+  _globals['_LISTPROJECTSREQUEST']._serialized_start=889
+  _globals['_LISTPROJECTSREQUEST']._serialized_end=949
+  _globals['_LISTPROJECTSRESPONSE']._serialized_start=951
+  _globals['_LISTPROJECTSRESPONSE']._serialized_end=1040
+  _globals['_UPDATEPROJECTREQUEST']._serialized_start=1043
+  _globals['_UPDATEPROJECTREQUEST']._serialized_end=1242
+  _globals['_DELETEPROJECTREQUEST']._serialized_start=1244
+  _globals['_DELETEPROJECTREQUEST']._serialized_end=1278
+  _globals['_NEWS']._serialized_start=1280
+  _globals['_NEWS']._serialized_end=1335
+  _globals['_RUN']._serialized_start=1338
+  _globals['_RUN']._serialized_end=1498
+  _globals['_STARTRUNREQUEST']._serialized_start=1500
+  _globals['_STARTRUNREQUEST']._serialized_end=1537
+  _globals['_STARTRUNRESPONSE']._serialized_start=1539
+  _globals['_STARTRUNRESPONSE']._serialized_end=1590
+  _globals['_GETRUNREQUEST']._serialized_start=1592
+  _globals['_GETRUNREQUEST']._serialized_end=1619
+  _globals['_GETRUNRESPONSE']._serialized_start=1621
+  _globals['_GETRUNRESPONSE']._serialized_end=1670
+  _globals['_LISTRUNSREQUEST']._serialized_start=1672
+  _globals['_LISTRUNSREQUEST']._serialized_end=1748
+  _globals['_LISTRUNSRESPONSE']._serialized_start=1750
+  _globals['_LISTRUNSRESPONSE']._serialized_end=1827
+  _globals['_PROJECTSERVICE']._serialized_start=2012
+  _globals['_PROJECTSERVICE']._serialized_end=2476
+  _globals['_RUNSERVICE']._serialized_start=2479
+  _globals['_RUNSERVICE']._serialized_end=2716
 # @@protoc_insertion_point(module_scope)
