@@ -1,0 +1,156 @@
+syntax = "proto3";
+
+package monitoring.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/field_mask.proto";
+
+option go_package = "gen/monitoring/v1;monitoringv1";
+
+// =====================================================
+// Общее
+// =====================================================
+
+enum SourceType {
+  SOURCE_TYPE_UNSPECIFIED = 0;
+  SOURCE_TYPE_TELEGRAM = 1;
+}
+
+enum RunState {
+  RUN_STATE_UNSPECIFIED = 0;
+  RUN_STATE_STARTED = 1;
+  RUN_STATE_DONE = 2;
+  RUN_STATE_FAILED = 3;
+}
+
+message ProjectFilter {
+  string id = 1;        // UUID, пусто при создании
+  string prompt = 2;    // текстовое указание пользователя, что интересно / не интересно
+}
+
+message Source {
+  string id = 1;        // UUID, пусто при создании
+  SourceType type = 2;
+  string telegram = 3;  // '@channel' | 't.me/channel' | 'channel'
+}
+
+message Project {
+  string id = 1;        // UUID
+  string name = 2;
+  string topic = 3;
+  repeated ProjectFilter filters = 4;
+  repeated Source sources = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+message News {
+  string title = 1;
+  string content = 2;
+  repeated string sources = 3;  // URL постов-источников
+}
+
+message RunStats {
+  int32 collected = 1;  // всего собрано новых сообщений
+  int32 relevant = 2;   // прошло message-filter
+  int32 news = 3;       // сформировано новостей
+  string error = 4;     // заполняется при RUN_STATE_FAILED
+}
+
+message Run {
+  string id = 1;         // UUID
+  string project_id = 2; // UUID
+  RunState state = 3;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp finished_at = 5;
+  RunStats stats = 6;
+  repeated News news = 7;
+}
+
+// =====================================================
+// Projects
+// =====================================================
+
+message CreateProjectRequest {
+  string name = 1;
+  string topic = 2;
+  repeated ProjectFilter filters = 3;
+  repeated Source sources = 4;
+}
+
+message CreateProjectResponse {
+  Project project = 1;
+}
+
+message GetProjectRequest {
+  string id = 1;
+}
+
+message ListProjectsRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListProjectsResponse {
+  repeated Project projects = 1;
+  string next_page_token = 2;
+}
+
+message UpdateProjectRequest {
+  Project project = 1;
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+message DeleteProjectRequest {
+  string id = 1;
+}
+
+// =====================================================
+// Runs
+// =====================================================
+
+message StartRunRequest {
+  string project_id = 1;
+}
+
+message StartRunResponse {
+  Run run = 1;
+}
+
+message GetRunRequest {
+  string id = 1;
+}
+
+message GetRunResponse {
+  Run run = 1;
+}
+
+message ListRunsRequest {
+  string project_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListRunsResponse {
+  repeated Run runs = 1;  // без News
+  string next_page_token = 2;
+}
+
+// =====================================================
+// Сервисы
+// =====================================================
+
+service ProjectService {
+  rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
+  rpc GetProject(GetProjectRequest) returns (Project);
+  rpc ListProjects(ListProjectsRequest) returns (ListProjectsResponse);
+  rpc UpdateProject(UpdateProjectRequest) returns (Project);
+  rpc DeleteProject(DeleteProjectRequest) returns (google.protobuf.Empty);
+}
+
+service RunService {
+  rpc StartRun(StartRunRequest) returns (StartRunResponse);
+  rpc GetRun(GetRunRequest) returns (GetRunResponse);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+}
