@@ -40,3 +40,25 @@ clean: ## Очистить сгенерированные файлы
 	@echo "🧹 Очищено"
 
 proto-all: lint generate ## Проверить и сгенерировать
+
+db-up: ## Поднять БД в docker
+	@docker compose up -d
+	@echo "⏳ Ожидание готовности БД..."
+	@sleep 3
+	@echo "✅ БД запущена на localhost:5432"
+
+db-down: ## Остановить БД
+	@docker compose down
+	@echo "✅ БД остановлена"
+
+db-reset: ## Полностью очистить БД (включая данные!)
+	@docker compose down -v
+	@echo "🗑  БД и все данные удалены"
+
+migrate: ## Применить миграции
+	@cd backend && alembic upgrade head
+	@echo "✅ Миграции применены"
+
+migration: ## Создать новую миграцию (использование: make migration name="add users")
+	@cd backend && alembic revision --autogenerate -m "$(name)"
+	@echo "✅ Миграция создана"
