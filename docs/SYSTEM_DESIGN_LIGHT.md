@@ -2,7 +2,7 @@
 
 > Упрощённая первая версия. Полный дизайн: [`SYSTEM_DESIGN.md`](./SYSTEM_DESIGN.md),
 > вводные: [`REQUIREMENTS.md`](./REQUIREMENTS.md). Контракт данных: [`../x.proto`](../x.proto).
-> План реализации по пунктам ведётся отдельно.
+> Запуск — §12, план реализации и статус — §13.
 
 Команда стартует с этой версии и наращивает её до полного дизайна. Задача light-версии — как можно
 быстрее получить сквозной путь: **создать проект → запустить Run → получить список новостей**.
@@ -210,9 +210,10 @@ sequenceDiagram
 
 Провайдер за абстракцией `app/llm/provider.py` — два метода: `filter_relevance(topic, extra, texts)`
 и `make_news(topic, messages)`. `LLM_PROVIDER = openai_compat | mock`.
-`openai_compat` рассчитан на OpenAI-совместимые API (OpenRouter: `LLM_BASE_URL=https://openrouter.ai/api/v1`,
-`LLM_MODEL=openai/gpt-4o-mini`); запрос — `response_format: {"type":"json_object"}` + починка JSON
-с ретраем. Оффлайн-демо — на `mock`.
+`openai_compat` рассчитан на OpenAI-совместимые API. Используем **RouterAI**:
+`LLM_BASE_URL=https://routerai.ru/api/v1` (клиент сам добавляет `/chat/completions`),
+`LLM_MODEL=openai/gpt-4o-mini`. Запрос — `response_format: {"type":"json_object"}` + починка JSON
+с ретраем ×3. Оффлайн-демо — на `mock`.
 
 ### message-filter (батч ~30 сообщений)
 
@@ -475,15 +476,141 @@ service RunService {
 
 ## 11. Критерии приёмки
 
-- [ ] `docker compose up --build` поднимает `nginx, backend, worker, postgres, redis`;
+Все пройдены на живом стеке (см. §13).
+
+- [x] `docker compose up --build` поднимает `nginx, backend, worker, postgres, redis`;
       `GET /api/health` = 200 и показывает `db/redis/llm_provider`.
-- [ ] `POST /api/projects` с 2 публичными Telegram-каналами и 1 текстовым фильтром → `200` + `id`.
-- [ ] `POST /api/projects/{id}/runs` → `Run{state:STARTED}`; в логах worker'а — extract по каждому каналу.
-- [ ] Polling `GET /api/runs/{id}` → `state:DONE`, `news[]` непустой, у новостей заполнен `sources`,
+- [x] `POST /api/projects` с 2 публичными Telegram-каналами и 1 текстовым фильтром → `200` + `id`.
+- [x] `POST /api/projects/{id}/runs` → `Run{state:STARTED}`; в логах worker'а — extract по каждому каналу.
+- [x] Polling `GET /api/runs/{id}` → `state:DONE`, `news[]` непустой, у новостей заполнен `sources`,
       `stats={collected,relevant,news}`.
-- [ ] Повторный `POST …/runs` обрабатывает только новые сообщения (курсор `last_msg_id` + `content_hash`),
+- [x] Повторный `POST …/runs` обрабатывает только новые сообщения (курсор `last_msg_id` + `content_hash`),
       дублей в `message` нет.
-- [ ] `LLM_PROVIDER=mock` — весь путь работает без сети.
-- [ ] `docker compose up --scale worker=2` — одна задача не берётся дважды
+- [x] `LLM_PROVIDER=mock` — весь путь работает без сети.
+- [x] `docker compose up --scale worker=2` — одна задача не берётся дважды
       (`claim:{job_id}` + `run:{id}:pending`).
-- [ ] Frontend: создание проекта, запуск Run с polling, отображение новостей и истории Run.
+- [x] Frontend: создание проекта, запуск Run с polling, отображение новостей и истории Run.
+
+---
+
+## 12. Как запускать
+
+### Поднять
+
+```bash
+cd ~/ai_product_hack
+cp .env.example .env        # только первый раз
+docker compose up -d
+```
+
+Открыть **http://localhost**. Swagger — http://localhost:8000/docs.
+
+Первая сборка образа фронта занимает **5–8 минут** (`npm install` внутри). Дальше — секунды.
+
+Проверка:
+
+```bash
+curl localhost/api/health
+# {"status":"ok","db":true,"redis":true,"llm_provider":"mock"}
+```
+
+### Завершить
+
+```bash
+docker compose down          # остановить, данные Postgres сохраняются в томе
+docker compose down -v       # + снести том (проекты и новости пропадут)
+```
+
+### Повседневное
+
+```bash
+docker compose ps                       # что запущено
+docker compose logs -f worker           # обработка в реальном времени
+docker compose restart worker           # после правок Python в worker/ llm/ ingestion/
+docker compose up -d --build            # пересборка (правки фронта или requirements.txt)
+docker compose up -d --scale worker=2   # два воркера
+```
+
+### Режим разработки
+
+Фронт долго собирается — во время работы над бэкендом поднимать без него:
+
+```bash
+docker compose up -d postgres redis backend worker
+curl localhost:8000/api/health
+```
+
+- `backend` запущен с `--reload` — правки Python подхватываются автоматически;
+- `worker` **не** перезагружается сам → `docker compose restart worker`;
+- схема БД создаётся на старте (`Base.metadata.create_all`), Alembic не используется;
+- отладка экстрактора:
+  `docker compose exec backend python -m app.ingestion.telegram_web cit_gov 7`
+
+Фронт с hot-reload локально (нужен Node 20):
+
+```bash
+cd apps/web && npm install && npm run dev   # :5173, /api проксируется на :8000
+```
+
+### Подключение реального LLM (RouterAI)
+
+По умолчанию `LLM_PROVIDER=mock` — без сети и ключей, но фильтрация и саммаризация грубые.
+
+```bash
+# .env
+LLM_PROVIDER=openai_compat
+LLM_BASE_URL=https://routerai.ru/api/v1
+LLM_API_KEY=<ключ RouterAI>
+LLM_MODEL=openai/gpt-4o-mini
+```
+
+Список моделей — `curl https://routerai.ru/api/v1/models` (~490, id в стиле OpenRouter:
+`openai/gpt-4o-mini`, `anthropic/claude-haiku-4.5`, `yandex/gpt-lite-5`, `deepseek/deepseek-chat`).
+
+```bash
+docker compose restart worker
+```
+
+### Если сборка падает из WSL
+
+`error getting credentials … docker-credential-desktop.exe`:
+
+```bash
+mkdir -p /tmp/dockercfg && echo '{"auths":{}}' > /tmp/dockercfg/config.json
+DOCKER_CONFIG=/tmp/dockercfg docker compose up -d --build
+```
+
+---
+
+## 13. План реализации (как это делалось)
+
+Разработка шла десятью шагами; каждый заканчивался проверкой на живом стеке.
+Все шаги выполнены.
+
+| # | Шаг | Что появилось | Чем проверено |
+|---|---|---|---|
+| 1 | Документация | этот документ + исправленный `x.proto` (proto3: `string id`, именованные поля, нулевые элементы энумов, недостающие Request/Response, `RunStats`, `FAILED`) | ручная сверка |
+| 2 | Каркас репозитория | `apps/api`, `apps/web`, `docker-compose.yml`, `.env.example`, `nginx.conf`, Dockerfile'ы | 4 сервиса поднялись, `/api/health` = ok |
+| 3 | БД и модели | `config.py`, `db.py`, `models.py` (6 таблиц), `schemas.py`, `routers/health.py` | таблицы созданы, `ux_message_hash` на месте |
+| 4 | Project CRUD | `routers/projects.py` | create → list → patch → 404 → delete + cascade |
+| 5 | Telegram-экстрактор | `ingestion/telegram_web.py`: `fetch()`, пагинация `?before=`, `content_hash`, `NoPreviewError`, CLI | 30 постов с `meduzalive`; курсор фильтрует; `rian_ru` → NoPreviewError |
+| 6 | Очередь и worker | `queue.py` (enqueue/claim/pending), `worker/jobs.py::handle_extract`, `worker/loop.py`, `POST /projects/{id}/runs` | 3 канала → 11 сообщений, 0 дублей; повторный run → `inserted=0`; дубль job_id → «уже в работе» |
+| 7 | LLM и compose | `llm/{provider,openai_compat,mock}.py`, полный `handle_compose` | mock: 20 сообщений → 15 релевантных → 15 новостей; недоступный LLM → Run `FAILED`, воркер жив |
+| 8 | Чтение Run | `GET /runs/{id}` (с `news[]`), `GET /projects/{id}/runs`, relationship `Run.news` | polling `STARTED`→`DONE`, список newest-first, 404 |
+| 9 | Фронтенд | `api/client.ts`, `main.tsx`, `App.tsx`, `pages/{ProjectsPage,ProjectPage,RunsPage}.tsx` | `tsc` без ошибок, `vite build` → 794 модуля; через nginx: SPA + fallback + бандл + полный путь |
+| 10 | Сборка e2e | README, финальная приёмка | все критерии §11; `--scale worker=2`; демо-прогон на 6 каналах: 41 сообщение → 23 релевантных → 23 новости |
+
+### Прогон на реальном LLM
+
+RouterAI, модель `deepseek/deepseek-v4-flash-0731`. Демо-проект, 6 каналов:
+**42 сообщения собрано → 25 релевантных (фильтр отсеял 17) → 23 новости**.
+Работает и группировка дублей из разных каналов — напр. «ИКС Холдинг вложит 35 млрд в
+полупроводники» пришло в `arperf` и `icipr` и схлопнулось в одну карточку с двумя источниками.
+Время прогона ~3 мин (3 вызова LLM по ~35 с; deepseek-flash с reasoning не быстрый — при
+необходимости берётся более быстрая модель из каталога `routerai.ru/api/v1/models`).
+
+### Что осталось за рамками light-версии
+
+- нет RSS/HTML-коннекторов (Кабельщик, часть сайтов) — см. путь наращивания в §1;
+- нет расписания, ранжирования, категорий/важности, поиска — всё это в
+  [`SYSTEM_DESIGN.md`](./SYSTEM_DESIGN.md).

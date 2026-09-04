@@ -1,4 +1,4 @@
-"""OpenAI-совместимый провайдер (OpenRouter, OpenAI, локальные прокси)."""
+"""OpenAI-совместимый провайдер (RouterAI, OpenAI, локальные прокси)."""
 from __future__ import annotations
 
 import json
@@ -34,7 +34,11 @@ _NEWS_SYS = (
 class OpenAICompatProvider:
     def __init__(self) -> None:
         s = get_settings()
-        self.base_url = s.llm_base_url.rstrip("/")
+        base = s.llm_base_url.rstrip("/")
+        # допускаем, что в ENV положили полный URL с /chat/completions
+        if base.endswith("/chat/completions"):
+            base = base[: -len("/chat/completions")]
+        self.base_url = base
         self.api_key = s.llm_api_key
         self.model = s.llm_model
         if not self.base_url or not self.model:

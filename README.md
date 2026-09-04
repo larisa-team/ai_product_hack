@@ -31,15 +31,19 @@ curl localhost/api/health
 ### LLM
 
 По умолчанию `LLM_PROVIDER=mock` — конвейер работает **без сети и без ключей**, но
-фильтрация и саммаризация грубые (эвристики). Для реального качества — OpenRouter:
+фильтрация и саммаризация грубые (эвристики). Для реального качества — RouterAI:
 
 ```bash
 # .env
 LLM_PROVIDER=openai_compat
-LLM_BASE_URL=https://openrouter.ai/api/v1
-LLM_API_KEY=sk-or-...
+LLM_BASE_URL=https://routerai.ru/api/v1
+LLM_API_KEY=<ключ RouterAI>
 LLM_MODEL=openai/gpt-4o-mini
 ```
+
+Доступные модели: `curl https://routerai.ru/api/v1/models` (~490 штук). Проверено на
+`deepseek/deepseek-v4-flash-0731`: 42 поста с 6 каналов → 25 релевантных → 23 новости,
+дубли из разных каналов схлопываются. Прогон ~3 мин.
 
 ```bash
 docker compose restart worker      # воркер не перечитывает код и env на лету
