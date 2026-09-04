@@ -1,0 +1,162 @@
+syntax = "proto3";
+
+package monitoring.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/field_mask.proto";
+
+option go_package = "gen/monitoring/v1;monitoringv1";
+
+// =====================================================
+// Общие сообщения
+// =====================================================
+
+enum SourceType {
+  SOURCE_TYPE_UNSPECIFIED = 0;
+  SOURCE_TYPE_TELEGRAM = 1;
+}
+
+enum RunState {
+  RUN_STATE_UNSPECIFIED = 0;
+  RUN_STATE_STARTED = 1;
+  RUN_STATE_DONE = 2;
+}
+
+enum FilterType {
+  PROMT_BASED = 0;
+}
+
+// =====================================================
+// Проекты
+// =====================================================
+
+message ProjectFilter {
+  FilterType type = 1;
+  string prompt = 2;
+}
+
+message Source {
+  SourceType type = 1;
+  string telegram = 2;
+}
+
+message Project {
+  string id = 1;
+  string name = 2;
+  string topic = 3;
+  repeated ProjectFilter filters = 4;
+  repeated Source sources = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+message CreateProjectRequest {
+  string name = 1;
+  string topic = 2;
+  repeated ProjectFilter filters = 3;
+  repeated Source sources = 4;
+}
+
+message CreateProjectResponse {
+  Project project = 1;
+}
+
+message GetProjectRequest {
+  string id = 1;
+}
+
+message GetProjectResponse {
+  Project project = 1;
+}
+
+message UpdateProjectResponse {
+  Project project = 1;
+}
+
+message DeleteProjectResponse {}
+
+message ListProjectsRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListProjectsResponse {
+  repeated Project projects = 1;
+  string next_page_token = 2;
+}
+
+message UpdateProjectRequest {
+  string id = 1;
+  string name = 2;
+  string topic = 3;
+  repeated ProjectFilter filters = 4;
+  repeated Source sources = 5;
+  google.protobuf.FieldMask update_mask = 6;
+}
+
+message DeleteProjectRequest {
+  string id = 1;
+}
+
+// =====================================================
+// Запуски
+// =====================================================
+
+message News {
+  string title = 1;
+  string content = 2;
+  repeated string sources = 3;
+}
+
+message Run {
+  string id = 1;
+  string project_id = 2;
+  google.protobuf.Timestamp created_at = 3;
+  repeated News news = 4;
+  RunState state = 5;
+}
+
+message StartRunRequest {
+  string project_id = 1;
+}
+
+message StartRunResponse {
+  Run run = 1;
+}
+
+message GetRunRequest {
+  string id = 1;
+}
+
+message GetRunResponse {
+  Run run = 1;
+}
+
+message ListRunsRequest {
+  string project_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListRunsResponse {
+  repeated Run runs = 1;
+  string next_page_token = 2;
+}
+
+// =====================================================
+// Сервисы
+// =====================================================
+
+service ProjectService {
+  rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
+  rpc GetProject(GetProjectRequest) returns (GetProjectResponse);
+  rpc ListProjects(ListProjectsRequest) returns (ListProjectsResponse);
+  rpc UpdateProject(UpdateProjectRequest) returns (UpdateProjectResponse);
+  rpc DeleteProject(DeleteProjectRequest) returns (DeleteProjectResponse);
+}
+
+service RunService {
+  rpc StartRun(StartRunRequest) returns (StartRunResponse);
+  rpc GetRun(GetRunRequest) returns (GetRunResponse);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+}
