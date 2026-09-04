@@ -132,10 +132,18 @@ async def handle_compose(payload: dict) -> None:
             capped = sorted(relevant, key=lambda m: m.posted_at or _MIN_DT, reverse=True)
             capped = capped[: settings.NEWSMAKER_CAP]
             capped.sort(key=lambda m: m.posted_at or _MIN_DT)
-            payload_msgs = [
-                {"i": i, "channel": m.channel, "text": m.text} for i, m in enumerate(capped)
-            ]
-            groups = await provider.make_news(project.topic, payload_msgs)
+            # Батчим: на большом входе reasoning-модель сжигает бюджет на размышления
+            # и возвращает результат лишь по части сообщений. Порядок хронологический,
+            # поэтому посты об одном событии обычно попадают в один батч.
+            groups = []
+            for offset in range(0, len(capped), settings.NEWSMAKER_BATCH):
+                batch = capped[offset : offset + settings.NEWSMAKER_BATCH]
+                payload_msgs = [
+                    {"i": i, "channel": m.channel, "text": m.text} for i, m in enumerate(batch)
+                ]
+                for g in await provider.make_news(project.topic, payload_msgs):
+                    # индексы внутри батча -> позиции в capped
+                    groups.append({**g, "message_indices": [offset + i for i in g["message_indices"]]})
 
             n_news = 0
             for g in groups:

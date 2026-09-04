@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     TG_FETCH_DAYS: int = 7              # глубина чтения канала
     FILTER_BATCH: int = 30              # размер батча message-filter
     NEWSMAKER_CAP: int = 100            # максимум relevant-сообщений в news-maker
+    NEWSMAKER_BATCH: int = 12           # сообщений на один вызов news-maker
 
     @property
     def cors_origin_list(self) -> list[str]:
