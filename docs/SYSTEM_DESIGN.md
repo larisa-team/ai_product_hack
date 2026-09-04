@@ -809,7 +809,7 @@ Rules (предпросмотр) и полем «показать по смыс�
 # docker-compose.yml
 services:
   api:
-    build: ./apps/api
+    build: ./backend
     environment:
       - LLM_PROVIDER=${LLM_PROVIDER:-mock}
       - EMBED_PROVIDER=${EMBED_PROVIDER:-local}
@@ -818,7 +818,7 @@ services:
       - ./data:/app/data          # SQLite + датасет + модель эмбеддингов (кэш HF)
     ports: ["8000:8000"]
   web:
-    build: ./apps/web
+    build: ./frontend
     environment:
       - VITE_API_BASE=http://localhost:8000/api
     ports: ["5173:5173"]

@@ -1,4 +1,4 @@
-.PHONY: help install lint generate clean format proto-all
+.PHONY: help install lint generate clean format proto-all up down dev ps logs db-up db-down db-reset migrate migration
 
 PROTO_FILES := $(shell find proto -name "*.proto")
 
@@ -41,24 +41,48 @@ clean: ## Очистить сгенерированные файлы
 
 proto-all: lint generate ## Проверить и сгенерировать
 
-db-up: ## Поднять БД в docker
-	@docker compose up -d
-	@echo "⏳ Ожидание готовности БД..."
-	@sleep 3
-	@echo "✅ БД запущена на localhost:5432"
+# =====================================================
+# Запуск приложения
+# =====================================================
 
-db-down: ## Остановить БД
+up: ## Поднять весь стек (первая сборка фронта ~5-8 мин)
+	@test -f .env || cp .env.example .env
+	@docker compose up -d --build
+	@echo "✅ UI: http://localhost   API: http://localhost/api/health"
+
+dev: ## Стек без фронта — быстрее для работы над бэкендом
+	@test -f .env || cp .env.example .env
+	@docker compose up -d --build postgres redis backend worker
+	@echo "✅ API: http://localhost:8000/api/health"
+
+down: ## Остановить стек (данные Postgres сохраняются)
 	@docker compose down
-	@echo "✅ БД остановлена"
+
+ps: ## Что запущено
+	@docker compose ps
+
+logs: ## Логи сервиса (по умолчанию worker; make logs s=backend)
+	@docker compose logs -f $(or $(s),worker)
+
+# =====================================================
+# База данных
+# =====================================================
+
+db-up: ## Поднять только Postgres и Redis
+	@docker compose up -d postgres redis
+	@echo "✅ Postgres localhost:5432, Redis localhost:6379"
+
+db-down: ## Остановить стек
+	@docker compose down
 
 db-reset: ## Полностью очистить БД (включая данные!)
 	@docker compose down -v
 	@echo "🗑  БД и все данные удалены"
 
-migrate: ## Применить миграции
-	@cd backend && alembic upgrade head
+migrate: ## Применить миграции (внутри контейнера backend)
+	@docker compose exec backend alembic upgrade head
 	@echo "✅ Миграции применены"
 
-migration: ## Создать новую миграцию (использование: make migration name="add users")
-	@cd backend && alembic revision --autogenerate -m "$(name)"
+migration: ## Создать миграцию (использование: make migration name="add users")
+	@docker compose exec backend alembic revision --autogenerate -m "$(name)"
 	@echo "✅ Миграция создана"

@@ -2,86 +2,87 @@
 
 Интеллектуальный аналитический центр на базе ИИ — прототип для хакатона.
 
-Автоматический сбор, дедупликация и саммаризация отраслевых новостей в едином интерфейсе,
-с ручным управлением проектами мониторинга и источниками.
+Пользователь заводит **проект мониторинга** (тема + текстовые фильтры + Telegram-каналы),
+жмёт «Запустить обновление» и получает ленту новостей: система собирает посты, отсеивает
+нерелевантные, схлопывает дубли из разных каналов и пишет саммари.
 
-Сейчас в репозитории работает **light-версия**: пользователь заводит проект мониторинга
-(тема + текстовые фильтры + Telegram-каналы), жмёт «Запустить обновление», и получает
-ленту новостей, собранную и саммаризированную LLM.
+Контракт API и модели данных описан в **[proto](proto/monitoring/v1/monitoring.proto)** —
+это источник правды, из него генерируются типы для бэкенда и фронтенда.
 
 ## Быстрый старт
 
 ```bash
-cp .env.example .env
-docker compose up --build          # первая сборка фронта ~5-8 мин (npm install)
+make up          # поднимет всё; первая сборка фронта ~5-8 мин (npm install)
+make migrate     # применить миграции
 ```
 
 Открыть **http://localhost**.
 
-Сервисы: `nginx` (:80) → React-статика + прокси `/api`, `backend` (FastAPI, :8000),
-`worker` (обработка), `postgres`, `redis`.
-
-Проверка, что всё поднялось:
-
 ```bash
 curl localhost/api/health
-# {"status":"ok","db":true,"redis":true,"llm_provider":"mock"}
+# {"status":"ok","db":true,"redis":true,"llm_provider":"mock","rpc":{...}}
 ```
+
+Все команды — `make help`.
 
 ### LLM
 
-По умолчанию `LLM_PROVIDER=mock` — конвейер работает **без сети и без ключей**, но
-фильтрация и саммаризация грубые (эвристики). Для реального качества — RouterAI:
+По умолчанию `LLM_PROVIDER=mock` — конвейер работает **без сети и без ключей**, но фильтрация
+и саммаризация грубые (эвристики). Для реального качества — RouterAI:
 
 ```bash
 # .env
 LLM_PROVIDER=openai_compat
 LLM_BASE_URL=https://routerai.ru/api/v1
 LLM_API_KEY=<ключ RouterAI>
-LLM_MODEL=openai/gpt-4o-mini
+LLM_MODEL=deepseek/deepseek-v4-flash-0731
 ```
-
-Доступные модели: `curl https://routerai.ru/api/v1/models` (~490 штук). Проверено на
-`deepseek/deepseek-v4-flash-0731`: 42 поста с 6 каналов → 25 релевантных → 23 новости,
-дубли из разных каналов схлопываются. Прогон ~3 мин.
 
 ```bash
-docker compose restart worker      # воркер не перечитывает код и env на лету
+docker compose up -d worker    # воркер не перечитывает env на лету
 ```
 
-## Как это работает
+Каталог моделей: `curl https://routerai.ru/api/v1/models` (~490 штук).
+
+## Архитектура
 
 ```
-POST /api/projects/{id}/runs
-  └─ backend: создаёт Run(STARTED), кладёт по задаче на источник в Redis (q:extract)
+              ┌── React (статика) ──┐
+браузер ─▶ nginx ─┤                 │
+              └── /api ─▶ backend (FastAPI, Connect-RPC) ─▶ Postgres
+                                    worker ─▶ Postgres + Redis + t.me + LLM
+```
+
+API — **Connect-протокол поверх HTTP/JSON**, без gRPC-сервера и grpc-web прокси:
+
+```
+POST /api/monitoring.v1.ProjectService/CreateProject
+POST /api/monitoring.v1.RunService/StartRun
+```
+
+Запрос разбирается сгенерированным из proto классом, поэтому поле, которого нет в контракте,
+отбивается с `400 invalid_argument`. Фронт ходит сгенерированным Connect-клиентом, так что
+то же расхождение ловится ещё на `tsc`.
+
+### Как идёт обработка
+
+```
+StartRun
+  └─ backend: Run(RUN_STATE_STARTED) + по задаче на канал в Redis (q:extract)
 
 worker (BRPOP)
-  ├─ extract:  t.me/s/<channel> → новые посты (курсор last_msg_id + дедуп по content_hash)
+  ├─ extract:  t.me/s/<channel> → новые посты
+  │            (курсор source_cursors.last_msg_id + дедуп по content_hash)
   └─ compose:  когда все extract готовы
        ├─ message-filter: LLM батчами по 30 → relevant true/false
-       └─ news-maker:     LLM один вызов → группировка дублей + саммари
-       └─ Run(DONE) + строки news
+       ├─ news-maker:     LLM батчами по 12 → группировка дублей + саммари
+       └─ Run(RUN_STATE_DONE) + строки news + stats
 
-frontend: polling GET /api/runs/{id} каждые 2 c, пока state != DONE
+фронт: polling GetRun каждые 2 c, пока state == RUN_STATE_STARTED
 ```
 
-Redis держит очереди (`q:extract`, `q:compose`), claim-ключи «взято в работу»
-(`claim:{job_id}`) и счётчик прогресса (`run:{id}:pending`), поэтому воркеров можно
-масштабировать: `docker compose up -d --scale worker=2`.
-
-## API
-
-| Метод | Путь | Назначение |
-|---|---|---|
-| `POST` | `/api/projects` | создать проект (name, topic, filters[], sources[]) |
-| `GET` | `/api/projects` | список проектов |
-| `GET/PATCH/DELETE` | `/api/projects/{id}` | чтение / правка / удаление |
-| `POST` | `/api/projects/{id}/runs` | запустить обновление |
-| `GET` | `/api/runs/{id}` | статус Run + новости |
-| `GET` | `/api/projects/{id}/runs` | история запусков |
-| `GET` | `/api/health` | статус сервисов |
-
-Swagger: http://localhost:8000/docs
+Redis держит очереди, claim-ключи «взято в работу» и счётчик прогресса, поэтому воркеров
+можно масштабировать: `docker compose up -d --scale worker=2`.
 
 ## Источники
 
@@ -95,31 +96,46 @@ Swagger: http://localhost:8000/docs
 `rustorgpred`, `government_rus`, `arperf`, `icipr`, `arppsoft`, `vedomosti`, `kommersant`,
 `telesputnik`.
 
+## Структура
+
+```
+proto/monitoring/v1/monitoring.proto   контракт — источник правды
+backend/
+  gen/                    сгенерированные Python-классы (make generate)
+  app/
+    connect.py            сервер Connect-протокола (реестр RPC, валидация по схеме)
+    main.py config.py queue.py
+    api/                  реализации RPC: project_api, run_api, registry
+    services/             mappers (ORM ↔ protobuf), project_service, run_service
+    database/             models, session, repositories
+    ingestion/            telegram_web
+    llm/                  provider, openai_compat (RouterAI), mock
+    worker/               loop (BRPOP), jobs (extract, compose)
+  migrations/             Alembic
+frontend/
+  src/gen/                сгенерированные TS-типы и Connect-клиенты (make generate)
+  src/api/client.ts       createConnectTransport + промис-клиенты
+  src/pages/              ProjectsPage, ProjectPage, RunsPage
+```
+
 ## Разработка
 
+См. [CONTRIBUTING.md](CONTRIBUTING.md) — установка тулинга, кодогенерация, рабочий процесс.
+
 ```bash
-docker compose up -d postgres redis backend worker   # без фронта, быстрее
+make dev                  # стек без фронта, быстрее
+make logs                 # логи воркера (make logs s=backend)
+make proto-all            # buf lint + перегенерация после правки proto
 ```
 
-- `backend` запущен с `--reload` — правки Python подхватываются автоматически.
-- `worker` **не** перезагружается сам: `docker compose restart worker`.
-- Схема БД создаётся на старте (`Base.metadata.create_all`), Alembic не используется.
-- Отладка экстрактора: `docker compose exec backend python -m app.ingestion.telegram_web cit_gov 7`
-
-```
-apps/api/app/
-  main.py config.py db.py models.py schemas.py queue.py
-  routers/     health.py projects.py runs.py
-  ingestion/   telegram_web.py
-  llm/         provider.py openai_compat.py mock.py
-  worker/      loop.py jobs.py
-apps/web/src/  api/client.ts  pages/{ProjectsPage,ProjectPage,RunsPage}.tsx
-```
+- `backend` запущен с `--reload` — правки Python подхватываются автоматически;
+- `worker` **не** перезагружается сам: `docker compose up -d worker`;
+- отладка экстрактора: `docker compose exec backend python -m app.ingestion.telegram_web cit_gov 7`.
 
 ## Документация
 
-- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — консолидированные вводные и журнал решений команды.
-- [docs/SYSTEM_DESIGN_LIGHT.md](docs/SYSTEM_DESIGN_LIGHT.md) — **дизайн текущей light-версии** и путь наращивания.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — как развернуть и как работать с proto.
+- [docs/SYSTEM_DESIGN_LIGHT.md](docs/SYSTEM_DESIGN_LIGHT.md) — **дизайн текущей версии** и путь наращивания.
+- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — вводные и журнал решений команды.
 - [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) — полный целевой инженерный проект.
-- [proto/monitoring/v1/monitoring.proto](proto/monitoring/v1/monitoring.proto) — контракт данных и API (источник правды, из него генерятся `backend/gen` и `frontend/src/gen`).
 - [PROJECT_SCENARIOS_AND_FILTERS.md](PROJECT_SCENARIOS_AND_FILTERS.md) — сценарии продукта и логика фильтрации.

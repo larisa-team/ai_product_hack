@@ -16,15 +16,16 @@
 | Типы источников | RSS, сайты регуляторов, Telegram, архив, ручной ввод | **только Telegram** (`t.me/s/<channel>`) |
 | Запуск обработки | ручной + расписание (APScheduler) | **только ручной Run** (`StartRun`/`GetRun`/`ListRuns`) |
 | Единица ленты | `NewsItem` — событие, агрегат первоисточников | `News` = `{title, content, sources[]}` внутри Run |
-| Дедупликация событий | эмбеддинги + пороги косинуса, окно N дней | **LLM группирует** сам в одном вызове news-maker |
-| Саммаризация | 1 вызов на событие, строгий structured output (6 полей) | 1 вызов news-maker на весь Run |
+| Дедупликация событий | эмбеддинги + пороги косинуса, окно N дней | **LLM группирует** сам (news-maker, батчами) |
+| Саммаризация | 1 вызов на событие, строгий structured output (6 полей) | news-maker батчами по `NEWSMAKER_BATCH` сообщений |
 | Категория / важность / тип / сущности | да, от LLM | **нет** в light |
 | Ранжирование | движок правил `field`/`semantic` + `protective` | **нет**; порядок = хронология / порядок от LLM |
 | Фильтрация | жёсткий отбор + мягкие правила + вью-фильтры | текстовые `filters[].prompt` → LLM relevant/нет |
 | Хранилище | SQLite + FTS5 | **Postgres 16** |
 | Фон | APScheduler в процессе FastAPI | **отдельный worker + Redis** (очередь, claim, счётчики) |
-| Инкрементальность | `last_fetched_at` + `profile_version` + кэш саммари | курсор `source.last_msg_id` + `content_hash` |
+| Инкрементальность | `last_fetched_at` + `profile_version` + кэш саммари | `source_cursors.last_msg_id` + `content_hash` |
 | Поиск | FTS5 `bm25()` | нет (список новостей за Run) |
+| API | самописный REST | **Connect-RPC из proto** (`proto/monitoring/v1/monitoring.proto`) |
 
 ### Путь наращивания к полному дизайну
 
@@ -51,10 +52,15 @@ flowchart LR
     W -->|filter + news-maker| LLM{{LLM provider<br/>openai_compat / mock}}
 ```
 
-**Контейнеры** (`docker-compose.yml`): `nginx`, `backend`, `worker`, `postgres`, `redis`.
-`backend` и `worker` — один Docker-образ (`apps/api`), разные команды запуска:
+**Контейнеры** (`docker-compose.yml`): `frontend` (nginx), `backend`, `worker`, `postgres`, `redis`.
+`backend` и `worker` — один Docker-образ (`./backend`), разные команды запуска:
 `uvicorn app.main:app` и `python -m app.worker.loop`. React собирается multi-stage сборкой, статика
-кладётся в образ `nginx`; `nginx` отдаёт `/` из статики и проксирует `/api/` → `backend:8000`.
+кладётся в образ nginx; nginx отдаёт `/` из статики и проксирует `/api/` → `backend:8000`
+(через `resolver 127.0.0.11` + переменную в `proxy_pass`, иначе после рестарта backend'а будет 502).
+
+**Транспорт — Connect поверх HTTP/JSON, без gRPC-сервера и grpc-web прокси.** Реализация —
+`backend/app/connect.py`: маршрут `POST /api/{package}.{Service}/{Method}`, реестр методов,
+разбор тела сгенерированным `_pb2`-классом, коды Connect → HTTP-статусы.
 
 ---
 
@@ -62,80 +68,71 @@ flowchart LR
 
 ```mermaid
 erDiagram
-    PROJECT ||--o{ PROJECT_FILTER : ""
-    PROJECT ||--o{ SOURCE : ""
-    PROJECT ||--o{ RUN : ""
-    PROJECT ||--o{ MESSAGE : ""
-    SOURCE  ||--o{ MESSAGE : ""
-    RUN     ||--o{ MESSAGE : ""
-    RUN     ||--o{ NEWS : ""
+    PROJECTS ||--o{ RUNS : ""
+    PROJECTS ||--o{ MESSAGES : ""
+    PROJECTS ||--o{ SOURCE_CURSORS : ""
+    RUNS     ||--o{ MESSAGES : ""
+    RUNS     ||--o{ NEWS : ""
 ```
 
-Эскиз DDL:
+Схема ведётся Alembic (`backend/migrations`), модели — `backend/app/database/models.py`.
 
 ```sql
-CREATE TABLE project (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL,
-  topic TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE projects (
+  id VARCHAR PRIMARY KEY,                -- uuid4 строкой (как в proto)
+  name VARCHAR(255) NOT NULL,
+  topic VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP NOT NULL,
+  updated_at TIMESTAMP NOT NULL,
+  filters JSONB NOT NULL DEFAULT '[]',   -- список monitoring.v1.ProjectFilter в proto3-JSON
+  sources JSONB NOT NULL DEFAULT '[]'    -- список monitoring.v1.Source в proto3-JSON
 );
 
-CREATE TABLE project_filter (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id UUID NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-  prompt TEXT NOT NULL
+CREATE TABLE runs (
+  id VARCHAR PRIMARY KEY,
+  project_id VARCHAR NOT NULL REFERENCES projects(id),
+  state VARCHAR(50) NOT NULL DEFAULT 'RUN_STATE_STARTED',  -- имя значения enum RunState
+  created_at TIMESTAMP NOT NULL,
+  stats JSONB NOT NULL DEFAULT '{}'      -- форма monitoring.v1.RunStats
 );
-
-CREATE TABLE source (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id UUID NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-  type TEXT NOT NULL DEFAULT 'telegram',
-  telegram TEXT NOT NULL,               -- '@channel' | 't.me/channel' | 'channel'
-  last_msg_id BIGINT                     -- курсор инкрементального чтения
-);
-
-CREATE TABLE run (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id UUID NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-  state TEXT NOT NULL DEFAULT 'STARTED'  -- STARTED | DONE | FAILED
-        CHECK (state IN ('STARTED','DONE','FAILED')),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  finished_at TIMESTAMPTZ,
-  stats JSONB NOT NULL DEFAULT '{}'      -- {collected, relevant, news, error?}
-);
-CREATE INDEX ix_run_project ON run(project_id, created_at DESC);
-
-CREATE TABLE message (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id UUID NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-  source_id  UUID NOT NULL REFERENCES source(id)  ON DELETE CASCADE,
-  run_id     UUID NOT NULL REFERENCES run(id)     ON DELETE CASCADE,
-  tg_channel TEXT NOT NULL,
-  tg_msg_id  BIGINT NOT NULL,
-  url        TEXT NOT NULL,
-  text       TEXT NOT NULL,
-  posted_at  TIMESTAMPTZ,
-  content_hash TEXT NOT NULL,
-  relevant   BOOLEAN,                    -- NULL до фильтра
-  UNIQUE (project_id, content_hash)      -- кросс-Run дедуп
-);
-CREATE INDEX ix_message_run ON message(run_id);
 
 CREATE TABLE news (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  run_id     UUID NOT NULL REFERENCES run(id)     ON DELETE CASCADE,
-  project_id UUID NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-  title   TEXT NOT NULL,
+  id SERIAL PRIMARY KEY,
+  run_id VARCHAR NOT NULL REFERENCES runs(id),
+  title TEXT NOT NULL,
   content TEXT NOT NULL,
-  sources JSONB NOT NULL DEFAULT '[]',   -- ["https://t.me/ch/123", ...]
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  sources JSONB NOT NULL DEFAULT '[]'    -- ["https://t.me/ch/123", ...]
 );
-CREATE INDEX ix_news_run ON news(run_id);
+
+-- Ниже — служебные таблицы, наружу в proto не выходят.
+
+CREATE TABLE messages (
+  id SERIAL PRIMARY KEY,
+  project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  run_id     VARCHAR NOT NULL REFERENCES runs(id)     ON DELETE CASCADE,
+  channel VARCHAR(255) NOT NULL,
+  tg_msg_id BIGINT NOT NULL,
+  url TEXT NOT NULL,
+  text TEXT NOT NULL,
+  posted_at TIMESTAMP,
+  content_hash VARCHAR(64) NOT NULL,
+  relevant BOOLEAN,                      -- NULL до message-filter
+  CONSTRAINT uq_messages_hash UNIQUE (project_id, content_hash)   -- кросс-Run дедуп
+);
+
+CREATE TABLE source_cursors (
+  project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  channel VARCHAR(255) NOT NULL,
+  last_msg_id BIGINT,                    -- курсор инкрементального чтения
+  PRIMARY KEY (project_id, channel)
+);
 ```
 
-Схема создаётся `Base.metadata.create_all` на старте backend (Alembic в light не заводим).
+**Почему `filters`/`sources` — JSONB, а курсор — отдельная таблица.** JSONB хранит вложенные
+структуры ровно в форме proto3-JSON соответствующих сообщений, поэтому конвертация в
+`services/mappers.py` — это `ParseDict`/`MessageToDict`, без ручного перекладывания полей.
+Служебный `last_msg_id` подмешивать в этот JSONB нельзя — схема разъедется с proto,
+поэтому он живёт в `source_cursors`.
 
 ---
 
@@ -150,59 +147,61 @@ sequenceDiagram
     participant TG as t.me/s/
     participant LLM as LLM
 
-    FE->>BE: POST /api/projects/{id}/runs
-    BE->>BE: INSERT run(state=STARTED)
-    BE->>RD: SET run:{run}:pending = N источников
-    loop по каждому источнику
-        BE->>RD: LPUSH q:extract {run, source}   (job_id = "{run}:{source}")
+    FE->>BE: POST /api/monitoring.v1.RunService/StartRun
+    BE->>BE: INSERT runs(state=RUN_STATE_STARTED)
+    BE->>RD: SET run:{run}:pending = N каналов
+    loop по каждому каналу из project.sources
+        BE->>RD: RPUSH q:extract {run, project, channel}
     end
-    BE-->>FE: 201 Run{STARTED}
+    BE-->>FE: StartRunResponse{run}
 
-    loop worker BRPOP q:extract / q:compose
+    loop worker BLPOP q:extract / q:compose
         W->>RD: SET claim:{job_id} NX EX 600
         alt claim получен
             W->>TG: GET t.me/s/<channel>?before=... (до last_msg_id / лимита / глубины)
             TG-->>W: посты
-            W->>W: content_hash; пропуск дублей (project_id, content_hash)
-            W->>BE Deferred: INSERT message(run_id=...)
-            W->>W: UPDATE source.last_msg_id
+            W->>W: INSERT messages ON CONFLICT DO NOTHING (project_id, content_hash)
+            W->>W: UPSERT source_cursors.last_msg_id
             W->>RD: DECR run:{run}:pending
             opt счётчик == 0
-                W->>RD: LPUSH q:compose {run}
+                W->>RD: RPUSH q:compose {run}
             end
         end
     end
 
-    W->>W: compose: msgs = SELECT * FROM message WHERE run_id={run}
-    alt msgs пусто
-        W->>W: run.state=DONE, stats={...:0}
+    W->>W: compose: SELECT * FROM messages WHERE run_id={run}
+    alt сообщений нет
+        W->>W: runs.state=RUN_STATE_DONE, stats={collected:0,...}
     else
-        W->>LLM: message-filter (батчи по 30) -> relevant true/false
-        W->>W: UPDATE message.relevant
-        W->>LLM: news-maker (все relevant, cap 100) -> [{title, content, message_indices}]
+        W->>LLM: message-filter, батчи по FILTER_BATCH -> relevant true/false
+        W->>W: messages.relevant = ...
+        W->>LLM: news-maker, батчи по NEWSMAKER_BATCH -> [{title, content, message_indices}]
         W->>W: INSERT news(sources = uniq url группы)
-        W->>W: run.state=DONE, finished_at, stats={collected, relevant, news}
+        W->>W: runs.state=RUN_STATE_DONE, stats={collected, relevant, news}
     end
 
-    FE->>BE: GET /api/runs/{id}  (polling каждые 2 c)
-    BE-->>FE: Run{DONE, news[...]}
+    FE->>BE: GetRun (polling каждые 2 c)
+    BE-->>FE: GetRunResponse{run: {state, stats, news[]}}
 ```
+
+Ошибка на этапе compose (недоступный LLM, невалидный JSON после ретраев) → `RUN_STATE_FAILED`
+и `stats.error`; воркер продолжает работу.
 
 ### Redis-ключи
 
 | Ключ | Тип | Назначение |
 |---|---|---|
-| `q:extract`, `q:compose` | list | очереди задач (`BRPOP`) |
+| `q:extract`, `q:compose` | list | очереди задач (`RPUSH` / `BLPOP`) |
 | `claim:{job_id}` | string, `SET NX EX 600` | «взято в работу» — параллельные worker'ы и повторные enqueue не дублируют обработку |
 | `run:{run_id}:pending` | integer, `DECR` | сколько extract-задач осталось; последний инициирует `compose` |
 
-`job_id`: `"{run_id}:{source_id}"` для extract, `"compose:{run_id}"` для compose.
+`job_id`: `"{run_id}:{channel}"` для extract, `"compose:{run_id}"` для compose.
 
 ### Отказоустойчивость (light-уровень)
 
 - worker умер посреди задачи → `claim:{job_id}` истекает через TTL, задачу можно перезапустить;
-- «завис» Run (в `STARTED` дольше N минут) → кнопка «Повторить» на фронте создаёт новый Run;
-- ошибка LLM/парсинга в compose → `run.state=FAILED`, `stats.error`, новости не создаются.
+- «завис» Run (в `RUN_STATE_STARTED` дольше N минут) → повторный `StartRun` создаёт новый Run;
+- ошибка LLM/парсинга в compose → `RUN_STATE_FAILED`, `stats.error`, новости не создаются.
 
 ---
 
@@ -227,7 +226,7 @@ schema: {"results":[{"i":int,"relevant":bool}]}
 
 `mock`: `relevant = любая лемма из topic присутствует в тексте` (pymorphy3).
 
-### news-maker (один вызов на Run, relevant с обрезкой до 100 свежих)
+### news-maker (батчами по `NEWSMAKER_BATCH`, relevant с обрезкой до `NEWSMAKER_CAP` свежих)
 
 ```
 system: Сгруппируй сообщения об одном и том же событии и сделай из каждой группы новость.
@@ -239,42 +238,73 @@ schema: {"news":[{"title":str,"content":str,"message_indices":[int]}]}
 
 Ответ обёрнут в объект (`{"news":[...]}`), т.к. `response_format: json_object` не допускает голый
 массив. `url` в запрос не передаём — восстанавливаем по индексу `i` при записи.
+
+**Почему батчами.** На вход из ~30 сообщений reasoning-модель (`deepseek-v4-flash`) тратила
+21k reasoning-токенов и возвращала результат лишь по 1–2 сообщениям. Режем вход на
+`NEWSMAKER_BATCH` (12) сообщений, индексы внутри батча сдвигаем обратно в общий список.
+Порядок хронологический, поэтому посты об одном событии обычно попадают в один батч.
+Замер на 6 каналах: было `relevant 28 → news 1`, стало `relevant 29 → news 27`.
 `News.sources` = уникальные `url` сообщений группы.
 `mock`: группировка по совпадению первых 4 слов сообщения; `content` = самое длинное сообщение
 группы (обрезка до 800 символов).
 
 ---
 
-## 6. REST API (зеркало `x.proto`)
+## 6. API — Connect-RPC из proto
 
-Базовый префикс `/api`. UUID — строки. Ошибки — `{ "detail": "..." }`.
+Транспорт: **Connect поверх HTTP/JSON**. Адрес метода складывается из полного имени сервиса
+в proto и имени RPC:
 
-| proto RPC | HTTP | Запрос → ответ |
-|---|---|---|
-| `CreateProject` | `POST /api/projects` | `{name, topic, filters:[{prompt}], sources:[{type:"telegram", telegram}]}` → `Project` |
-| `ListProjects` | `GET /api/projects` | → `Project[]` |
-| `GetProject` | `GET /api/projects/{id}` | → `Project` |
-| `UpdateProject` | `PATCH /api/projects/{id}` | частичный объект → `Project` |
-| `DeleteProject` | `DELETE /api/projects/{id}` | → `204` |
-| `StartRun` | `POST /api/projects/{id}/runs` | → `Run` (`state=STARTED`, `news=[]`) |
-| `GetRun` | `GET /api/runs/{id}` | → `Run` (`news[]` при `DONE`) |
-| `ListRuns` | `GET /api/projects/{id}/runs` | → `Run[]` (без `news`) |
-
-```jsonc
-// Project
-{ "id":"uuid", "name":"...", "topic":"...",
-  "filters":[{"id":"uuid","prompt":"..."}],
-  "sources":[{"id":"uuid","type":"telegram","telegram":"@channel"}],
-  "created_at":"...", "updated_at":"..." }
-
-// Run
-{ "id":"uuid", "project_id":"uuid", "state":"STARTED|DONE|FAILED",
-  "created_at":"...", "finished_at":null,
-  "stats":{"collected":42,"relevant":18,"news":6},
-  "news":[ {"title":"...","content":"...","sources":["https://t.me/ch/123"]} ] }
+```
+POST /api/{package}.{Service}/{Method}
+Content-Type: application/json
+тело      — сообщение Request  в proto3-JSON
+200       — сообщение Response в proto3-JSON
+ошибка    — HTTP-код + {"code": "...", "message": "..."}
 ```
 
-Pydantic-схемы вручную зеркалят proto-сообщения (генерацию из proto не подключаем).
+| RPC | Путь |
+|---|---|
+| `ProjectService.CreateProject` | `POST /api/monitoring.v1.ProjectService/CreateProject` |
+| `ProjectService.GetProject` | `POST /api/monitoring.v1.ProjectService/GetProject` |
+| `ProjectService.ListProjects` | `POST /api/monitoring.v1.ProjectService/ListProjects` |
+| `ProjectService.UpdateProject` | `POST /api/monitoring.v1.ProjectService/UpdateProject` |
+| `ProjectService.DeleteProject` | `POST /api/monitoring.v1.ProjectService/DeleteProject` |
+| `RunService.StartRun` | `POST /api/monitoring.v1.RunService/StartRun` |
+| `RunService.GetRun` | `POST /api/monitoring.v1.RunService/GetRun` |
+| `RunService.ListRuns` | `POST /api/monitoring.v1.RunService/ListRuns` |
+
+Плюс служебный `GET /api/health` — вне контракта, инфраструктурный (отдаёт также реестр
+зарегистрированных RPC).
+
+Коды ошибок Connect → HTTP: `invalid_argument` 400, `not_found` 404, `failed_precondition` 412,
+`unimplemented` 501, `internal` 500.
+
+```jsonc
+// CreateProject
+{ "name": "ИТ-мониторинг", "topic": "цифровые технологии, гранты",
+  "filters": [{"prompt": "не интересны поздравления"}],
+  "sources": [{"type": "SOURCE_TYPE_TELEGRAM", "telegram": "cit_gov"}] }
+
+// GetRun
+{ "run": { "id": "...", "projectId": "...", "state": "RUN_STATE_DONE",
+           "createdAt": "2026-09-04T13:28:00Z",
+           "stats": {"collected": 40, "relevant": 29, "news": 27},
+           "news": [{"title": "...", "content": "...", "sources": ["https://t.me/ch/1"]}] } }
+```
+
+### Где контракт реально проверяется
+
+| Сторона | Механизм | Что происходит при расхождении |
+|---|---|---|
+| Backend | `json_format.Parse(body, RequestPb(), ignore_unknown_fields=False)` | `400 invalid_argument` с перечислением допустимых полей |
+| Backend | `services/mappers.py` — единственное место ORM ↔ protobuf | смена proto ломает сборку сообщения в одном месте |
+| Backend | `connect.py` сверяет тип ответа хендлера с объявленным в proto | `500 internal` |
+| Frontend | `createPromiseClient(ProjectService, transport)` из `src/gen/` | ошибка `tsc` (`TS2353: ... does not exist in type PartialMessage<...>`) |
+| Оба | `make lint` (buf) + `make generate` в чеклисте перед коммитом | несогласованный proto не пройдёт review |
+
+Терсность proto3-JSON: поля со значением по умолчанию в ответе опускаются, поэтому
+`stats` со всеми нулями приходит как `{}` — сгенерированный клиент подставляет нули сам.
 
 ---
 
@@ -283,213 +313,121 @@ Pydantic-схемы вручную зеркалят proto-сообщения (г
 | Путь | Экран | Содержимое |
 |---|---|---|
 | `/` | **Projects** | список проектов + форма создания: `name`, `topic`, повторяемые поля «текстовый фильтр» и «Telegram-канал» |
-| `/projects/:id` | **Project** | данные проекта; кнопка «Запустить обновление» → `POST …/runs` → polling `GET /api/runs/{id}` каждые 2 c; плашка `stats`; лента карточек `News` (`title`, `content`, ссылки-источники) |
+| `/projects/:id` | **Project** | данные проекта; кнопка «Запустить обновление» → `StartRun` → polling `GetRun` каждые 2 c; плашка `stats`; лента карточек `News` (`title`, `content`, ссылки-источники) |
 | `/projects/:id/runs` | **Runs** | история запусков со `state` и `stats` |
 
 Стек: React + Vite + TS, TanStack Query (polling), Mantine.
+Клиент — сгенерированный: `src/api/client.ts` создаёт
+`createConnectTransport({ baseUrl: "/api" })` и `createPromiseClient(ProjectService | RunService)`.
+Типы `Project`, `Run`, `News`, `RunState`, `SourceType` берутся из `src/gen/`, руками не пишутся:
+enum `RunState.DONE` вместо строки, `run.createdAt.toDate()`, `run.stats?.collected`.
 
 ---
 
 ## 8. Конфигурация (ENV)
 
+`backend/app/config.py`, значения по умолчанию — в `.env.example`. Секреты кладутся в `.env`
+(в git не попадает).
+
 | Переменная | Default | Назначение |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+psycopg://app:app@postgres:5432/app` | Postgres |
+| `DATABASE_URL` | `postgresql+asyncpg://app:app@postgres:5432/app` | Postgres. Alembic сам подменяет драйвер на синхронный |
 | `REDIS_URL` | `redis://redis:6379/0` | Redis |
+| `CORS_ORIGINS` | `http://localhost` | адрес фронта |
+| `DEBUG` | `false` | уровень логов, echo SQL |
 | `LLM_PROVIDER` | `mock` | `openai_compat` \| `mock` |
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | — | для `openai_compat` |
-| `TG_FETCH_LIMIT` | `100` | максимум постов на канал за Run |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | — | для `openai_compat` (RouterAI) |
+| `TG_FETCH_LIMIT` | `100` | максимум постов на канал за прогон |
 | `TG_FETCH_DAYS` | `7` | глубина чтения канала |
 | `FILTER_BATCH` | `30` | размер батча message-filter |
-| `NEWSMAKER_CAP` | `100` | максимум relevant-сообщений в news-maker |
-| `CORS_ORIGINS` | `http://localhost` | адрес фронта |
+| `NEWSMAKER_CAP` | `100` | максимум relevant-сообщений, уходящих в news-maker |
+| `NEWSMAKER_BATCH` | `12` | сообщений на один вызов news-maker |
 
 ---
 
 ## 9. docker-compose
 
 ```
-services:
-  postgres:  image postgres:16, volume, healthcheck pg_isready
-  redis:     image redis:7, healthcheck redis-cli ping
-  backend:   build ./apps/api, cmd uvicorn app.main:app --host 0.0.0.0 --port 8000
-             depends_on: postgres(healthy), redis(healthy)
-  worker:    build ./apps/api, cmd python -m app.worker.loop
-             depends_on: postgres(healthy), redis(healthy)
-  nginx:     build ./apps/web (multi-stage: node build -> nginx со статикой + nginx.conf)
-             ports 80:80, depends_on: backend
+postgres:  postgres:16-alpine, том pgdata, healthcheck pg_isready
+redis:     redis:7-alpine, healthcheck redis-cli ping
+backend:   build ./backend, uvicorn app.main:app --reload, :8000, код примонтирован
+worker:    build ./backend (тот же образ), python -m app.worker.loop
+frontend:  build ./frontend (multi-stage: node build -> nginx со статикой), :80
 ```
 
-`nginx.conf`: `location / { try_files $uri /index.html; }`, `location /api/ { proxy_pass http://backend:8000; }`.
+`backend` и `worker` делят один образ и общий блок переменных (YAML-anchor `x-backend-env`).
+`PYTHONPATH=/app:/app/gen`, чтобы работал `from monitoring.v1 import monitoring_pb2`.
+
+Воркеров можно масштабировать: `docker compose up -d --scale worker=2` — задачи разбираются
+через `BLPOP`, повторный захват отсекается `claim`-ключом.
 
 ---
 
-## 10. Приложение: исправленный `x.proto`
+## 10. Контракт и кодогенерация
 
-Проблемы исходного файла:
+Источник правды — [`proto/monitoring/v1/monitoring.proto`](../proto/monitoring/v1/monitoring.proto).
+Дублирующий `x.proto` в корне удалён.
 
-- нет типа `uuid` в proto3 → `string id` с комментарием `// UUID`;
-- `message Run { ... repeated News = 2; ... }` — у поля нет имени → `repeated News news = 2`;
-- `message GetRunRequest { uuid = 1; }` — нет имени и типа → `string id = 1`;
-- отсутствуют `GetProjectRequest`, `ListProjectsRequest`, `ListProjectsResponse`,
-  `UpdateProjectRequest`, `DeleteProjectRequest`, `ListRunsResponse` (упомянуты в сервисах);
-- `ProjectFilter.promt` → `prompt`;
-- в proto3 у enum обязателен нулевой элемент → `*_UNSPECIFIED = 0`;
-- `RunState` без `FAILED`;
-- импортируются, но не используются `duration`, `empty` (кроме `DeleteProject`), `field_mask`
-  (используем в `UpdateProjectRequest`).
+```bash
+make lint       # buf lint
+make generate   # backend/gen/*.py  +  frontend/src/gen/*.ts
+make proto-all  # то и другое
+```
 
-Рабочая версия — в [`../x.proto`](../x.proto) (файл приведён к этому виду):
+Сгенерированное **коммитится** (`backend/gen/`, `frontend/src/gen/`): `docker compose build`
+копирует `gen/` из контекста сборки, иначе образ не соберётся без предварительной генерации.
+Правило: изменил `.proto` → `make generate` → коммить вместе.
+
+### Что было дописано в контракт под функциональность
 
 ```proto
-syntax = "proto3";
-package monitoring.v1;
-
-import "google/protobuf/timestamp.proto";
-import "google/protobuf/empty.proto";
-import "google/protobuf/field_mask.proto";
-
-option go_package = "gen/monitoring/v1;monitoringv1";
-
-// ---------- Общее ----------
-
-enum SourceType {
-  SOURCE_TYPE_UNSPECIFIED = 0;
-  SOURCE_TYPE_TELEGRAM = 1;
-}
-
 enum RunState {
-  RUN_STATE_UNSPECIFIED = 0;
-  RUN_STATE_STARTED = 1;
-  RUN_STATE_DONE = 2;
-  RUN_STATE_FAILED = 3;
+  ...
+  RUN_STATE_FAILED = 3;      // прогон упал (LLM недоступен и т.п.)
 }
 
-message ProjectFilter {
-  string id = 1;      // UUID, пусто при создании
-  string prompt = 2;
-}
-
-message Source {
-  string id = 1;      // UUID, пусто при создании
-  SourceType type = 2;
-  string telegram = 3; // @channel | t.me/channel | channel
-}
-
-message Project {
-  string id = 1;      // UUID
-  string name = 2;
-  string topic = 3;
-  repeated ProjectFilter filters = 4;
-  repeated Source sources = 5;
-  google.protobuf.Timestamp created_at = 6;
-  google.protobuf.Timestamp updated_at = 7;
-}
-
-message News {
-  string title = 1;
-  string content = 2;
-  repeated string sources = 3; // URL постов-источников
-}
-
+// Итоги прогона: сколько собрано, сколько прошло фильтр, сколько новостей получилось.
 message RunStats {
   int32 collected = 1;
   int32 relevant = 2;
   int32 news = 3;
-  string error = 4;
+  string error = 4;          // заполняется только при RUN_STATE_FAILED
 }
 
 message Run {
-  string id = 1;         // UUID
-  string project_id = 2; // UUID
-  RunState state = 3;
-  google.protobuf.Timestamp created_at = 4;
-  google.protobuf.Timestamp finished_at = 5;
+  ...
   RunStats stats = 6;
-  repeated News news = 7;
-}
-
-// ---------- Projects ----------
-
-message CreateProjectRequest {
-  string name = 1;
-  string topic = 2;
-  repeated ProjectFilter filters = 3;
-  repeated Source sources = 4;
-}
-message CreateProjectResponse { Project project = 1; }
-
-message GetProjectRequest { string id = 1; }
-
-message ListProjectsRequest {
-  int32 page_size = 1;
-  string page_token = 2;
-}
-message ListProjectsResponse {
-  repeated Project projects = 1;
-  string next_page_token = 2;
-}
-
-message UpdateProjectRequest {
-  Project project = 1;
-  google.protobuf.FieldMask update_mask = 2;
-}
-
-message DeleteProjectRequest { string id = 1; }
-
-// ---------- Runs ----------
-
-message StartRunRequest { string project_id = 1; }
-message StartRunResponse { Run run = 1; }
-
-message GetRunRequest { string id = 1; }
-message GetRunResponse { Run run = 1; }
-
-message ListRunsRequest {
-  string project_id = 1;
-  int32 page_size = 2;
-  string page_token = 3;
-}
-message ListRunsResponse {
-  repeated Run runs = 1;    // без News
-  string next_page_token = 2;
-}
-
-// ---------- Сервисы ----------
-
-service ProjectService {
-  rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
-  rpc GetProject(GetProjectRequest) returns (Project);
-  rpc ListProjects(ListProjectsRequest) returns (ListProjectsResponse);
-  rpc UpdateProject(UpdateProjectRequest) returns (Project);
-  rpc DeleteProject(DeleteProjectRequest) returns (google.protobuf.Empty);
-}
-
-service RunService {
-  rpc StartRun(StartRunRequest) returns (StartRunResponse);
-  rpc GetRun(GetRunRequest) returns (GetRunResponse);
-  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
 }
 ```
+
+### Замечание по `FilterType`
+
+У `FilterType` нулевое значение содержательное (`PROMT_BASED = 0`), поэтому в proto3-JSON оно
+всегда опускается и «не задан» от «prompt-based» неотличимо. Пока тип фильтра один — это
+безвредно. При появлении второго стоит добавить `FILTER_TYPE_UNSPECIFIED = 0` и сдвинуть
+остальные (ломающее изменение, поймается `buf breaking`).
 
 ---
 
 ## 11. Критерии приёмки
 
-Все пройдены на живом стеке (см. §13).
+Все пройдены на живом стеке.
 
-- [x] `docker compose up --build` поднимает `nginx, backend, worker, postgres, redis`;
-      `GET /api/health` = 200 и показывает `db/redis/llm_provider`.
-- [x] `POST /api/projects` с 2 публичными Telegram-каналами и 1 текстовым фильтром → `200` + `id`.
-- [x] `POST /api/projects/{id}/runs` → `Run{state:STARTED}`; в логах worker'а — extract по каждому каналу.
-- [x] Polling `GET /api/runs/{id}` → `state:DONE`, `news[]` непустой, у новостей заполнен `sources`,
-      `stats={collected,relevant,news}`.
-- [x] Повторный `POST …/runs` обрабатывает только новые сообщения (курсор `last_msg_id` + `content_hash`),
-      дублей в `message` нет.
+- [x] `make proto-all` — `buf lint` чист, генерация Python + TS без ошибок.
+- [x] `make up` поднимает `frontend, backend, worker, postgres, redis`;
+      `GET /api/health` = 200 и показывает `db`, `redis`, `llm_provider` и реестр RPC.
+- [x] `make migrate` — таблицы `projects, runs, news, messages, source_cursors`.
+- [x] Полный CRUD через Connect: Create → Get → List → Update (`update_mask` уважается) → Delete.
+- [x] **Контроль контракта, бэкенд:** лишнее поле в запросе → `400 invalid_argument`
+      с перечислением допустимых полей.
+- [x] **Контроль контракта, фронт:** поле не из proto → ошибка `tsc` `TS2353`.
+- [x] `StartRun` на 6 каналах заказчика → polling `GetRun` → `RUN_STATE_DONE`,
+      `stats={collected:40, relevant:29, news:27}`, дубли из разных каналов схлопнуты.
+- [x] Повторный `StartRun` → `collected:0`, новых строк в `messages` нет (курсор + `content_hash`).
 - [x] `LLM_PROVIDER=mock` — весь путь работает без сети.
-- [x] `docker compose up --scale worker=2` — одна задача не берётся дважды
-      (`claim:{job_id}` + `run:{id}:pending`).
-- [x] Frontend: создание проекта, запуск Run с polling, отображение новостей и истории Run.
+- [x] `--scale worker=2` — одна задача не берётся дважды.
+- [x] Недоступный LLM → `RUN_STATE_FAILED` + `stats.error`, воркер жив.
+- [x] Фронт: `npm run build` без ошибок типов; в браузере — создание проекта, запуск, лента, история.
 
 ---
 
@@ -499,58 +437,39 @@ service RunService {
 
 ```bash
 cd ~/ai_product_hack
-cp .env.example .env        # только первый раз
-docker compose up -d
+make up          # создаст .env из .env.example, соберёт и поднимет стек
+make migrate     # применить миграции
 ```
 
-Открыть **http://localhost**. Swagger — http://localhost:8000/docs.
-
-Первая сборка образа фронта занимает **5–8 минут** (`npm install` внутри). Дальше — секунды.
-
-Проверка:
+Открыть **http://localhost**. Первая сборка фронта — 5–8 минут (`npm install`), дальше секунды.
 
 ```bash
 curl localhost/api/health
-# {"status":"ok","db":true,"redis":true,"llm_provider":"mock"}
+# {"status":"ok","db":true,"redis":true,"llm_provider":"mock","rpc":{...}}
 ```
 
 ### Завершить
 
 ```bash
-docker compose down          # остановить, данные Postgres сохраняются в томе
-docker compose down -v       # + снести том (проекты и новости пропадут)
+make down        # остановить, данные Postgres сохраняются в томе
+make db-reset    # + снести том (проекты и новости пропадут)
 ```
 
 ### Повседневное
 
 ```bash
-docker compose ps                       # что запущено
-docker compose logs -f worker           # обработка в реальном времени
-docker compose restart worker           # после правок Python в worker/ llm/ ingestion/
-docker compose up -d --build            # пересборка (правки фронта или requirements.txt)
+make ps                                 # что запущено
+make logs                               # логи воркера (make logs s=backend)
+make dev                                # стек без фронта — быстрее для бэкенда
+docker compose up -d worker             # после правок worker/ llm/ ingestion
 docker compose up -d --scale worker=2   # два воркера
-```
-
-### Режим разработки
-
-Фронт долго собирается — во время работы над бэкендом поднимать без него:
-
-```bash
-docker compose up -d postgres redis backend worker
-curl localhost:8000/api/health
+make proto-all                          # после правки .proto
 ```
 
 - `backend` запущен с `--reload` — правки Python подхватываются автоматически;
-- `worker` **не** перезагружается сам → `docker compose restart worker`;
-- схема БД создаётся на старте (`Base.metadata.create_all`), Alembic не используется;
+- `worker` **не** перезагружается сам;
 - отладка экстрактора:
-  `docker compose exec backend python -m app.ingestion.telegram_web cit_gov 7`
-
-Фронт с hot-reload локально (нужен Node 20):
-
-```bash
-cd apps/web && npm install && npm run dev   # :5173, /api проксируется на :8000
-```
+  `docker compose exec backend python -m app.ingestion.telegram_web cit_gov 7`.
 
 ### Подключение реального LLM (RouterAI)
 
@@ -561,56 +480,76 @@ cd apps/web && npm install && npm run dev   # :5173, /api проксируетс
 LLM_PROVIDER=openai_compat
 LLM_BASE_URL=https://routerai.ru/api/v1
 LLM_API_KEY=<ключ RouterAI>
-LLM_MODEL=openai/gpt-4o-mini
+LLM_MODEL=deepseek/deepseek-v4-flash-0731
 ```
-
-Список моделей — `curl https://routerai.ru/api/v1/models` (~490, id в стиле OpenRouter:
-`openai/gpt-4o-mini`, `anthropic/claude-haiku-4.5`, `yandex/gpt-lite-5`, `deepseek/deepseek-chat`).
 
 ```bash
-docker compose restart worker
+docker compose up -d worker backend
 ```
 
-### Если сборка падает из WSL
+Список моделей — `curl https://routerai.ru/api/v1/models` (~490).
 
-`error getting credentials … docker-credential-desktop.exe`:
+### Грабли, на которые уже наступили
 
-```bash
-mkdir -p /tmp/dockercfg && echo '{"auths":{}}' > /tmp/dockercfg/config.json
-DOCKER_CONFIG=/tmp/dockercfg docker compose up -d --build
-```
+- **502 через nginx после рестарта backend** — nginx кеширует IP апстрима. Лечится
+  `resolver 127.0.0.11` + переменной в `proxy_pass` (уже в `frontend/nginx.conf`).
+- **Воркер стартует со старого образа** — если compose переиспользовал тег от прежней сборки,
+  нужен `docker compose up -d --build` (или `docker compose down --remove-orphans`).
+- **Тихий откат на `mock`** — если пропал `.env`, `LLM_PROVIDER` берёт значение по умолчанию.
+  Проверяется `curl localhost/api/health`.
+- **Сборка из WSL падает на `docker-credential-desktop.exe`**:
+  ```bash
+  mkdir -p /tmp/dockercfg && echo '{"auths":{}}' > /tmp/dockercfg/config.json
+  DOCKER_CONFIG=/tmp/dockercfg docker compose up -d --build
+  ```
 
 ---
 
 ## 13. План реализации (как это делалось)
 
-Разработка шла десятью шагами; каждый заканчивался проверкой на живом стеке.
-Все шаги выполнены.
+Работа шла в два захода. Сначала собрали работающую light-версию на самописном REST
+(`apps/api` + `apps/web`), затем перевели её на proto-first каркас команды.
+
+### Этап 1 — рабочий прототип (10 шагов)
+
+| # | Шаг | Чем проверено |
+|---|---|---|
+| 1 | Документация + приведение proto к валидному proto3 | ручная сверка |
+| 2 | Каркас репозитория, `docker-compose.yml` | сервисы поднялись, health |
+| 3 | БД и модели | таблицы созданы |
+| 4 | CRUD проектов | create → list → patch → 404 → delete + cascade |
+| 5 | Telegram-экстрактор (`t.me/s/`, пагинация, `content_hash`, `NoPreviewError`) | 30 постов с `meduzalive`, курсор фильтрует |
+| 6 | Очередь Redis + воркер (extract) | 11 сообщений без дублей, claim отсекает повтор |
+| 7 | LLM-провайдер + compose (filter + news-maker) | mock без сети; недоступный LLM → FAILED |
+| 8 | Чтение Run | polling STARTED → DONE |
+| 9 | Фронтенд (3 экрана) | `tsc` чист, сквозной путь через nginx |
+| 10 | Сборка e2e, README | все критерии приёмки |
+
+### Этап 2 — перевод на proto-first (8 шагов)
 
 | # | Шаг | Что появилось | Чем проверено |
 |---|---|---|---|
-| 1 | Документация | этот документ + исправленный `x.proto` (proto3: `string id`, именованные поля, нулевые элементы энумов, недостающие Request/Response, `RunStats`, `FAILED`) | ручная сверка |
-| 2 | Каркас репозитория | `apps/api`, `apps/web`, `docker-compose.yml`, `.env.example`, `nginx.conf`, Dockerfile'ы | 4 сервиса поднялись, `/api/health` = ok |
-| 3 | БД и модели | `config.py`, `db.py`, `models.py` (6 таблиц), `schemas.py`, `routers/health.py` | таблицы созданы, `ux_message_hash` на месте |
-| 4 | Project CRUD | `routers/projects.py` | create → list → patch → 404 → delete + cascade |
-| 5 | Telegram-экстрактор | `ingestion/telegram_web.py`: `fetch()`, пагинация `?before=`, `content_hash`, `NoPreviewError`, CLI | 30 постов с `meduzalive`; курсор фильтрует; `rian_ru` → NoPreviewError |
-| 6 | Очередь и worker | `queue.py` (enqueue/claim/pending), `worker/jobs.py::handle_extract`, `worker/loop.py`, `POST /projects/{id}/runs` | 3 канала → 11 сообщений, 0 дублей; повторный run → `inserted=0`; дубль job_id → «уже в работе» |
-| 7 | LLM и compose | `llm/{provider,openai_compat,mock}.py`, полный `handle_compose` | mock: 20 сообщений → 15 релевантных → 15 новостей; недоступный LLM → Run `FAILED`, воркер жив |
-| 8 | Чтение Run | `GET /runs/{id}` (с `news[]`), `GET /projects/{id}/runs`, relationship `Run.news` | polling `STARTED`→`DONE`, список newest-first, 404 |
-| 9 | Фронтенд | `api/client.ts`, `main.tsx`, `App.tsx`, `pages/{ProjectsPage,ProjectPage,RunsPage}.tsx` | `tsc` без ошибок, `vite build` → 794 модуля; через nginx: SPA + fallback + бандл + полный путь |
-| 10 | Сборка e2e | README, финальная приёмка | все критерии §11; `--scale worker=2`; демо-прогон на 6 каналах: 41 сообщение → 23 релевантных → 23 новости |
+| 1 | Расширение proto | `RunStats`, `Run.stats`, `RUN_STATE_FAILED` | `buf lint` = 0, оба `gen/` содержат новые типы |
+| 2 | Connect-адаптер + каркас backend | `app/connect.py`, `main.py`, `queue.py`, Dockerfile | health с реестром RPC; несуществующий RPC → 501 |
+| 3 | Модель БД под перенесённую логику | `Message`, `SourceCursor`, `Run.stats`, миграция | дедуп, upsert курсора |
+| 4 | Мапперы + `ProjectService` | `services/mappers.py`, `api/project_api.py` | CRUD; `update_mask`; **лишнее поле → 400** |
+| 5 | Перенос ingestion / llm на async | `ingestion/`, `llm/` | живой канал; mock; RouterAI |
+| 6 | `RunService` + воркер | `run_service.py`, `run_api.py`, `worker/` | 22 → 15 → 15; идемпотентность; 2 воркера; FAILED |
+| 7 | Фронт на сгенерированном клиенте | `api/client.ts`, 3 страницы | `tsc` чист; **поле не из proto → TS2353** |
+| 8 | Уборка и документация | удалён `apps/`, цели в `Makefile`, README/CONTRIBUTING/этот документ | `make up` с нуля |
 
-### Прогон на реальном LLM
+### Что чинили по ходу второго этапа
 
-RouterAI, модель `deepseek/deepseek-v4-flash-0731`. Демо-проект, 6 каналов:
-**42 сообщения собрано → 25 релевантных (фильтр отсеял 17) → 23 новости**.
-Работает и группировка дублей из разных каналов — напр. «ИКС Холдинг вложит 35 млрд в
-полупроводники» пришло в `arperf` и `icipr` и схлопнулось в одну карточку с двумя источниками.
-Время прогона ~3 мин (3 вызова LLM по ~35 с; deepseek-flash с reasoning не быстрый — при
-необходимости берётся более быстрая модель из каталога `routerai.ru/api/v1/models`).
+1. **news-maker захлёбывался.** На ~30 сообщениях reasoning-модель тратила 21k токенов
+   на размышления и возвращала 1–2 группы. Ввели `NEWSMAKER_BATCH` — стало 27 новостей из 29.
+2. **nginx отдавал 502** после рестарта backend — кешировал IP. `resolver` + переменная в `proxy_pass`.
+3. **Alembic ходил на захардкоженный `localhost`** — переведён на `settings.DATABASE_URL`.
+4. **`runs.stats NOT NULL` без дефолта** — миграция упала бы на непустой таблице,
+   добавлен `server_default '{}'::jsonb`.
 
-### Что осталось за рамками light-версии
+### Что осталось за рамками
 
-- нет RSS/HTML-коннекторов (Кабельщик, часть сайтов) — см. путь наращивания в §1;
+- нет RSS/HTML-коннекторов (Кабельщик и часть сайтов) — см. путь наращивания в §1;
 - нет расписания, ранжирования, категорий/важности, поиска — всё это в
-  [`SYSTEM_DESIGN.md`](./SYSTEM_DESIGN.md).
+  [`SYSTEM_DESIGN.md`](./SYSTEM_DESIGN.md);
+- пагинация в `ListProjects`/`ListRuns` реализована по `page_token`, но фронт её пока не использует.
