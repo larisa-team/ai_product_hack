@@ -121,5 +121,5 @@ apps/web/src/  api/client.ts  pages/{ProjectsPage,ProjectPage,RunsPage}.tsx
 - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — консолидированные вводные и журнал решений команды.
 - [docs/SYSTEM_DESIGN_LIGHT.md](docs/SYSTEM_DESIGN_LIGHT.md) — **дизайн текущей light-версии** и путь наращивания.
 - [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) — полный целевой инженерный проект.
-- [x.proto](x.proto) — контракт данных и API (proto3).
+- [proto/monitoring/v1/monitoring.proto](proto/monitoring/v1/monitoring.proto) — контракт данных и API (источник правды, из него генерятся `backend/gen` и `frontend/src/gen`).
 - [PROJECT_SCENARIOS_AND_FILTERS.md](PROJECT_SCENARIOS_AND_FILTERS.md) — сценарии продукта и логика фильтрации.

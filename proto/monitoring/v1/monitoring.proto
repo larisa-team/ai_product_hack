@@ -20,6 +20,7 @@ enum RunState {
   RUN_STATE_UNSPECIFIED = 0;
   RUN_STATE_STARTED = 1;
   RUN_STATE_DONE = 2;
+  RUN_STATE_FAILED = 3;
 }
 
 enum FilterType {
@@ -108,12 +109,22 @@ message News {
   repeated string sources = 3;
 }
 
+// Итоги прогона: сколько собрано, сколько прошло фильтр, сколько новостей получилось.
+message RunStats {
+  int32 collected = 1;
+  int32 relevant = 2;
+  int32 news = 3;
+  // Заполняется только при RUN_STATE_FAILED.
+  string error = 4;
+}
+
 message Run {
   string id = 1;
   string project_id = 2;
   google.protobuf.Timestamp created_at = 3;
   repeated News news = 4;
   RunState state = 5;
+  RunStats stats = 6;
 }
 
 message StartRunRequest {

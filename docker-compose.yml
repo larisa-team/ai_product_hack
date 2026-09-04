@@ -1,9 +1,10 @@
 name: ai-product-hack
 
-x-api-env: &api-env
-  PYTHONDONTWRITEBYTECODE: "1"
-  DATABASE_URL: postgresql+psycopg://app:app@postgres:5432/app
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/app
   REDIS_URL: redis://redis:6379/0
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+  DEBUG: ${DEBUG:-false}
   LLM_PROVIDER: ${LLM_PROVIDER:-mock}
   LLM_BASE_URL: ${LLM_BASE_URL:-}
   LLM_API_KEY: ${LLM_API_KEY:-}
@@ -12,7 +13,6 @@ x-api-env: &api-env
   TG_FETCH_DAYS: ${TG_FETCH_DAYS:-7}
   FILTER_BATCH: ${FILTER_BATCH:-30}
   NEWSMAKER_CAP: ${NEWSMAKER_CAP:-100}
-  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
 
 services:
   postgres:
@@ -38,11 +38,11 @@ services:
       retries: 20
 
   backend:
-    build: ./apps/api
+    build: ./backend
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    environment: *api-env
+    environment: *backend-env
     volumes:
-      - ./apps/api:/app
+      - ./backend:/app
     ports:
       - "8000:8000"
     depends_on:
@@ -52,19 +52,19 @@ services:
         condition: service_healthy
 
   worker:
-    build: ./apps/api
+    build: ./backend
     command: python -m app.worker.loop
-    environment: *api-env
+    environment: *backend-env
     volumes:
-      - ./apps/api:/app
+      - ./backend:/app
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
 
-  nginx:
-    build: ./apps/web
+  frontend:
+    build: ./frontend
     ports:
       - "80:80"
     depends_on:

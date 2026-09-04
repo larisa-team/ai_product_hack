@@ -1,7 +1,7 @@
 # System Design Light
 
 > Упрощённая первая версия. Полный дизайн: [`SYSTEM_DESIGN.md`](./SYSTEM_DESIGN.md),
-> вводные: [`REQUIREMENTS.md`](./REQUIREMENTS.md). Контракт данных: [`../x.proto`](../x.proto).
+> вводные: [`REQUIREMENTS.md`](./REQUIREMENTS.md). Контракт данных: [`../proto/monitoring/v1/monitoring.proto`](../proto/monitoring/v1/monitoring.proto).
 > Запуск — §12, план реализации и статус — §13.
 
 Команда стартует с этой версии и наращивает её до полного дизайна. Задача light-версии — как можно

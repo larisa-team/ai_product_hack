@@ -44,12 +44,18 @@ export enum RunState {
    * @generated from enum value: RUN_STATE_DONE = 2;
    */
   DONE = 2,
+
+  /**
+   * @generated from enum value: RUN_STATE_FAILED = 3;
+   */
+  FAILED = 3,
 }
 // Retrieve enum metadata with: proto3.getEnumType(RunState)
 proto3.util.setEnumType(RunState, "monitoring.v1.RunState", [
   { no: 0, name: "RUN_STATE_UNSPECIFIED" },
   { no: 1, name: "RUN_STATE_STARTED" },
   { no: 2, name: "RUN_STATE_DONE" },
+  { no: 3, name: "RUN_STATE_FAILED" },
 ]);
 
 /**
@@ -699,6 +705,65 @@ export class News extends Message<News> {
 }
 
 /**
+ * Итоги прогона: сколько собрано, сколько прошло фильтр, сколько новостей получилось.
+ *
+ * @generated from message monitoring.v1.RunStats
+ */
+export class RunStats extends Message<RunStats> {
+  /**
+   * @generated from field: int32 collected = 1;
+   */
+  collected = 0;
+
+  /**
+   * @generated from field: int32 relevant = 2;
+   */
+  relevant = 0;
+
+  /**
+   * @generated from field: int32 news = 3;
+   */
+  news = 0;
+
+  /**
+   * Заполняется только при RUN_STATE_FAILED.
+   *
+   * @generated from field: string error = 4;
+   */
+  error = "";
+
+  constructor(data?: PartialMessage<RunStats>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "monitoring.v1.RunStats";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "collected", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
+    { no: 2, name: "relevant", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
+    { no: 3, name: "news", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
+    { no: 4, name: "error", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RunStats {
+    return new RunStats().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RunStats {
+    return new RunStats().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RunStats {
+    return new RunStats().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RunStats | PlainMessage<RunStats> | undefined, b: RunStats | PlainMessage<RunStats> | undefined): boolean {
+    return proto3.util.equals(RunStats, a, b);
+  }
+}
+
+/**
  * @generated from message monitoring.v1.Run
  */
 export class Run extends Message<Run> {
@@ -727,6 +792,11 @@ export class Run extends Message<Run> {
    */
   state = RunState.UNSPECIFIED;
 
+  /**
+   * @generated from field: monitoring.v1.RunStats stats = 6;
+   */
+  stats?: RunStats;
+
   constructor(data?: PartialMessage<Run>) {
     super();
     proto3.util.initPartial(data, this);
@@ -740,6 +810,7 @@ export class Run extends Message<Run> {
     { no: 3, name: "created_at", kind: "message", T: Timestamp },
     { no: 4, name: "news", kind: "message", T: News, repeated: true },
     { no: 5, name: "state", kind: "enum", T: proto3.getEnumType(RunState) },
+    { no: 6, name: "stats", kind: "message", T: RunStats },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Run {
