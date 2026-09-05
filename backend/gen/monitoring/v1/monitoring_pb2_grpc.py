@@ -437,3 +437,170 @@ class RunService:
             timeout,
             metadata,
             _registered_method=True)
+
+
+class NewsServiceStub:
+    """Лента проекта: чтение с фильтрами, правка карточки, ручное добавление.
+    Управления источниками здесь нет намеренно — это UpdateProject с
+    update_mask: ["sources"] и новым массивом.
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.ListNews = channel.unary_unary(
+                '/monitoring.v1.NewsService/ListNews',
+                request_serializer=monitoring_dot_v1_dot_monitoring__pb2.ListNewsRequest.SerializeToString,
+                response_deserializer=monitoring_dot_v1_dot_monitoring__pb2.ListNewsResponse.FromString,
+                _registered_method=True)
+        self.UpdateNews = channel.unary_unary(
+                '/monitoring.v1.NewsService/UpdateNews',
+                request_serializer=monitoring_dot_v1_dot_monitoring__pb2.UpdateNewsRequest.SerializeToString,
+                response_deserializer=monitoring_dot_v1_dot_monitoring__pb2.UpdateNewsResponse.FromString,
+                _registered_method=True)
+        self.CreateNews = channel.unary_unary(
+                '/monitoring.v1.NewsService/CreateNews',
+                request_serializer=monitoring_dot_v1_dot_monitoring__pb2.CreateNewsRequest.SerializeToString,
+                response_deserializer=monitoring_dot_v1_dot_monitoring__pb2.CreateNewsResponse.FromString,
+                _registered_method=True)
+
+
+class NewsServiceServicer:
+    """Лента проекта: чтение с фильтрами, правка карточки, ручное добавление.
+    Управления источниками здесь нет намеренно — это UpdateProject с
+    update_mask: ["sources"] и новым массивом.
+    """
+
+    def ListNews(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpdateNews(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CreateNews(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_NewsServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'ListNews': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListNews,
+                    request_deserializer=monitoring_dot_v1_dot_monitoring__pb2.ListNewsRequest.FromString,
+                    response_serializer=monitoring_dot_v1_dot_monitoring__pb2.ListNewsResponse.SerializeToString,
+            ),
+            'UpdateNews': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateNews,
+                    request_deserializer=monitoring_dot_v1_dot_monitoring__pb2.UpdateNewsRequest.FromString,
+                    response_serializer=monitoring_dot_v1_dot_monitoring__pb2.UpdateNewsResponse.SerializeToString,
+            ),
+            'CreateNews': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateNews,
+                    request_deserializer=monitoring_dot_v1_dot_monitoring__pb2.CreateNewsRequest.FromString,
+                    response_serializer=monitoring_dot_v1_dot_monitoring__pb2.CreateNewsResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'monitoring.v1.NewsService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('monitoring.v1.NewsService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class NewsService:
+    """Лента проекта: чтение с фильтрами, правка карточки, ручное добавление.
+    Управления источниками здесь нет намеренно — это UpdateProject с
+    update_mask: ["sources"] и новым массивом.
+    """
+
+    @staticmethod
+    def ListNews(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/monitoring.v1.NewsService/ListNews',
+            monitoring_dot_v1_dot_monitoring__pb2.ListNewsRequest.SerializeToString,
+            monitoring_dot_v1_dot_monitoring__pb2.ListNewsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdateNews(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/monitoring.v1.NewsService/UpdateNews',
+            monitoring_dot_v1_dot_monitoring__pb2.UpdateNewsRequest.SerializeToString,
+            monitoring_dot_v1_dot_monitoring__pb2.UpdateNewsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateNews(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/monitoring.v1.NewsService/CreateNews',
+            monitoring_dot_v1_dot_monitoring__pb2.CreateNewsRequest.SerializeToString,
+            monitoring_dot_v1_dot_monitoring__pb2.CreateNewsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

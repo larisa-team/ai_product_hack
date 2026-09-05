@@ -58,11 +58,39 @@ def project_to_pb(project: Project) -> pb.Project:
     )
 
 
+def entities_to_pb(raw: dict[str, Any] | None) -> pb.NewsEntities:
+    return json_format.ParseDict(raw or {}, pb.NewsEntities(), ignore_unknown_fields=True)
+
+
+def _enum_value(enum_type: Any, name: str | None) -> int:
+    """Имя значения enum -> число. Неизвестное/пустое -> 0 (*_UNSPECIFIED).
+
+    Строки в БД писал не только текущий код (миграции, ручные правки), поэтому
+    падать на незнакомом значении нельзя — карточка важнее её категории.
+    """
+    if not name:
+        return 0
+    try:
+        return enum_type.Value(name)
+    except ValueError:
+        return 0
+
+
 def news_to_pb(item: News) -> pb.News:
     return pb.News(
+        id=item.id or 0,
+        project_id=item.project_id or "",
+        run_id=item.run_id or "",
         title=item.title,
         content=item.content,
         sources=list(item.sources or []),
+        category=_enum_value(pb.NewsCategory, item.category),
+        importance=_enum_value(pb.NewsImportance, item.importance),
+        doc_type=_enum_value(pb.DocType, item.doc_type),
+        entities=entities_to_pb(item.entities),
+        tags=list(item.tags or []),
+        hidden=bool(item.hidden),
+        created_at=to_timestamp(item.created_at),
     )
 
 
@@ -83,6 +111,18 @@ def run_to_pb(run: Run, news: list[News] | None = None) -> pb.Run:
 
 # --- утилиты для источников ---
 
-def channel_of(source: pb.Source) -> str:
-    """Имя Telegram-канала из Source (нормализация — в ingestion.telegram_web)."""
-    return source.telegram
+def source_key(source: pb.Source) -> str:
+    """Ключ источника: он же ключ курсора чтения и адрес задачи воркера.
+
+    Для Telegram — имя канала (нормализация в ingestion.telegram_web), для RSS — URL
+    ленты. Одно поле вместо ветвлений по всему конвейеру: различает источники только
+    тот код, который реально ходит в сеть.
+    """
+    if source.type == pb.SourceType.SOURCE_TYPE_RSS:
+        return source.rss_url.strip()
+    return source.telegram.strip()
+
+
+def source_type_name(source: pb.Source) -> str:
+    """Имя значения SourceType — в таком виде тип едет в payload задачи."""
+    return pb.SourceType.Name(source.type)

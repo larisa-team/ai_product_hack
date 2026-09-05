@@ -1,4 +1,4 @@
-.PHONY: help install lint generate clean format proto-all up down dev ps logs db-up db-down db-reset migrate migration
+.PHONY: help install venv lint generate clean format proto-all up down dev ps logs test smoke db-up db-down db-reset migrate migration
 
 PROTO_FILES := $(shell find proto -name "*.proto")
 
@@ -19,16 +19,35 @@ lint: ## Проверить proto файлы
 	@echo "✅ Proto файлы в порядке"
 
 generate: ## Сгенерировать Python + TypeScript код
+	@test -d .venv || $(MAKE) --no-print-directory venv
 	@echo "⚡ Генерация Python кода..."
 	@.venv/bin/python -m grpc_tools.protoc -Iproto --python_out=backend/gen --grpc_python_out=backend/gen $(PROTO_FILES)
-	@echo "⚡ Генерация TypeScript кода..."
-	@protoc --plugin=protoc-gen-es=frontend/node_modules/.bin/protoc-gen-es --plugin=protoc-gen-connect-es=frontend/node_modules/.bin/protoc-gen-connect-es --es_out=frontend/src/gen --es_opt=target=ts --connect-es_out=frontend/src/gen --connect-es_opt=target=ts -Iproto $(PROTO_FILES)
+	@echo "⚡ Генерация TypeScript кода (в контейнере — protoc/node на хосте не нужны)..."
+	@docker run --rm \
+		-v "$(PWD)":/w \
+		-v "$(shell .venv/bin/python -c 'import grpc_tools, os; print(os.path.join(os.path.dirname(grpc_tools.__file__), "_proto"))')":/wkt:ro \
+		-w /w node:20-alpine sh -c '\
+			apk add --no-cache protobuf >/dev/null 2>&1; \
+			protoc \
+				--plugin=protoc-gen-es=frontend/node_modules/.bin/protoc-gen-es \
+				--plugin=protoc-gen-connect-es=frontend/node_modules/.bin/protoc-gen-connect-es \
+				--es_out=frontend/src/gen --es_opt=target=ts \
+				--connect-es_out=frontend/src/gen --connect-es_opt=target=ts \
+				-I/wkt -Iproto $(PROTO_FILES)'
 	@echo ""
 	@echo "📁 Python файлы:"
 	@find backend/gen -type f -name '*.py' 2>/dev/null || true
 	@echo ""
 	@echo "📁 TypeScript файлы:"
 	@find frontend/src/gen -type f -name '*.ts' 2>/dev/null || true
+	@echo ""
+	@echo "⚠️  Сгенерированное коммитится вместе с .proto — иначе образ не соберётся."
+
+venv: ## Создать .venv с grpcio-tools (нужен для генерации)
+	@python3 -m venv .venv
+	@.venv/bin/pip install -q --upgrade pip
+	@.venv/bin/pip install -q grpcio-tools protobuf
+	@echo "✅ .venv готов"
 
 format: ## Отформатировать proto файлы
 	@buf format -w
@@ -78,6 +97,13 @@ db-down: ## Остановить стек
 db-reset: ## Полностью очистить БД (включая данные!)
 	@docker compose down -v
 	@echo "🗑  БД и все данные удалены"
+
+test: ## Юнит-тесты бэкенда (без Postgres/Redis/сети — гоняются локально в образе)
+	@docker compose build backend >/dev/null
+	@docker compose run --rm --no-deps -e PYTHONPATH=/app:/app/gen backend sh -c "pip install -q -r requirements-dev.txt && pytest -q"
+
+smoke: ## Сквозная проверка стека: CreateProject -> StartRun -> polling -> итог
+	@python3 scripts/smoke.py
 
 migrate: ## Применить миграции (внутри контейнера backend)
 	@docker compose exec backend alembic upgrade head

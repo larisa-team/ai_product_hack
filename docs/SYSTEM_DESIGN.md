@@ -1,917 +1,769 @@
-# System Design: Интеллектуальный аналитический центр
+# System Design
 
-> Вводные и журнал решений — в [`REQUIREMENTS.md`](./REQUIREMENTS.md).
-> Этот документ доведён до уровня «можно кодить»: контракты, схемы, алгоритмы, пороги.
+> **Актуальный инженерный дизайн системы.** Вводные и требования: [`REQUIREMENTS.md`](./REQUIREMENTS.md).
+> Контракт данных — источник правды: [`../proto/monitoring/v1/monitoring.proto`](../proto/monitoring/v1/monitoring.proto).
+> Первая (Telegram-only) версия описана в [`SYSTEM_DESIGN_LIGHT.md`](./SYSTEM_DESIGN_LIGHT.md) —
+> она оставлена как история, ссылаться при разработке нужно на этот документ.
+
+**Как читать пометки статуса:**
+
+| Пометка | Значение |
+|---|---|
+| ✅ | реализовано и проверено вживую |
+| 🔜 | проектируется в этом заходе (закрытие чек-листа организаторов) |
+| ⏭ | сознательно вне скоупа, см. §13 «Путь наращивания» |
+
+Документ описывает целевое состояние на защиту. Пункты 🔜 — это дизайн, под который пишется код,
+а не отчёт о сделанном; расхождение между 🔜 и кодом — нормально в процессе, но к защите пометки
+должны стать ✅ либо переехать в §13.
+
+---
 
 ## Содержание
 
-1. [Обзор архитектуры](#1-обзор-архитектуры)
-2. [Технологический стек](#2-технологический-стек)
-3. [Модель данных](#3-модель-данных)
-4. [Конвейер обработки](#4-конвейер-обработки)
-5. [Модуль Ingestion](#5-модуль-ingestion)
-6. [Модуль Processing](#6-модуль-processing)
-7. [Модуль Ranking](#7-модуль-ranking)
-8. [HTTP API](#8-http-api)
-9. [Frontend](#9-frontend)
-10. [Планировщик](#10-планировщик)
-11. [Конфигурация](#11-конфигурация)
-12. [Метрики и наблюдаемость](#12-метрики-и-наблюдаемость)
-13. [Развёртывание](#13-развёртывание)
-14. [Риски и меры](#14-риски-и-меры)
-15. [Раздача работы и порядок реализации](#15-раздача-работы-и-порядок-реализации)
-16. [Критерии приёмки](#16-критерии-приёмки)
+1. [Обзор и границы](#1-обзор-и-границы)
+2. [Топология развёртывания](#2-топология-развёртывания)
+3. [Модель данных (Postgres)](#3-модель-данных-postgres)
+4. [Жизненный цикл Run](#4-жизненный-цикл-run)
+5. [Источники (ingestion)](#5-источники-ingestion)
+6. [Обработка (LLM)](#6-обработка-llm)
+7. [API — Connect-RPC из proto](#7-api--connect-rpc-из-proto)
+8. [Frontend](#8-frontend)
+9. [Конфигурация и docker-compose](#9-конфигурация-и-docker-compose)
+10. [Контракт и кодогенерация](#10-контракт-и-кодогенерация)
+11. [Критерии приёмки](#11-критерии-приёмки)
+12. [Как запускать](#12-как-запускать)
+13. [Путь наращивания](#13-путь-наращивания)
 
 ---
 
-## 1. Обзор архитектуры
+## 1. Обзор и границы
 
-Монолитный backend (FastAPI) + SPA (React). Единственное хранилище — SQLite. Фоновая обработка —
-в том же процессе через APScheduler. LLM и эмбеддинги — за абстракцией провайдера с оффлайн-фолбэком.
+Пользователь заводит **проект мониторинга** (тема + текстовые фильтры + источники), запускает
+обновление и получает ленту новостей: система собирает материалы из источников разных типов,
+отсеивает нерелевантное, схлопывает сообщения об одном событии в одну карточку, пишет саммари
+и проставляет категорию, важность и сущности. Карточку можно отредактировать, скрыть или
+добавить руками; по ленте работают фильтры и поиск.
+
+**Ключевые принципы**
+
+1. **Контракт — источник правды.** Всё, что пересекает провод, описано в
+   `proto/monitoring/v1/monitoring.proto`; типы для бэкенда и фронтенда генерируются из него.
+   Поле вне контракта отбивается бэкендом (`400 invalid_argument`) и не компилируется на фронте
+   (`tsc`). Подробно — §10.
+2. **«Что это» отделено от «насколько это интересно».** «Что это» (саммари, категория, важность,
+   сущности) считает LLM — дорого и один раз на карточку. «Насколько интересно» (фильтры ленты,
+   поиск) — дешёвые операции над готовыми карточками, без обращения к LLM.
+3. **Правки пользователя не затираются.** Каждый Run создаёт новые строки `news`, а не
+   переписывает существующие, поэтому отредактированная руками карточка не может быть молча
+   перегенерирована (решение Р11 из `REQUIREMENTS.md`).
+4. **Данные не теряются.** «Удаление» новости и источника — это скрытие (`hidden` / `disabled`),
+   строки остаются в БД.
+5. **Оффлайн-режим первого класса.** `LLM_PROVIDER=mock` даёт весь сквозной путь без сети и
+   ключей — демо не зависит от доступности внешнего API.
+
+**Границы**
+
+| В скоупе | Вне скоупа (и почему) |
+|---|---|
+| Источники: Telegram + RSS (СМИ и регуляторы) | Скрейпинг произвольных HTML-сайтов регуляторов ⏭ — хрупко; регуляторы, которые нужны для демо, отдают RSS |
+| Категория / важность / тип / сущности от LLM | Движок правил ранжирования `field`/`semantic` ⏭ — чек-лист требует *показывать* приоритет, а не давать настраивать веса; §13 |
+| Дедупликация событий LLM-группировкой | Эмбеддинги + кластеризация ⏭ — LLM-группировка уже даёт кросс-источниковое схлопывание (решение Р3) |
+| Фильтры ленты + текстовый поиск | Полнотекстовый поиск на FTS/`tsvector` ⏭ — на объёме демо `ILIKE` достаточно |
+| Ручной запуск обновления | Расписание/APScheduler ⏭ — §13 |
+| | Аутентификация, многопользовательский режим, промышленная нагрузка — явно вне скоупа хакатона (`REQUIREMENTS.md` §1) |
+
+---
+
+## 2. Топология развёртывания
 
 ```mermaid
-flowchart TB
-    subgraph ext[Внешние источники]
-        RSS[RSS-ленты СМИ]
-        REG[Сайты регуляторов]
-        TG[Telegram t.me/s/]
-        ARCH[(Оффлайн-датасет)]
-    end
-
-    subgraph api[FastAPI backend]
-        ING[ingestion/*<br/>коннекторы]
-        PIPE[processing/pipeline<br/>оркестрация]
-        CLEAN[clean + dedup]
-        EMB[embed<br/>эмбеддинги]
-        CLUST[cluster<br/>событийная кластеризация]
-        LLM[llm/* + analyze<br/>саммаризация]
-        RANK[ranking/engine + rules<br/>+ protective]
-        SCHED[scheduler<br/>APScheduler]
-        REST[routers/*<br/>REST API]
-    end
-
-    DB[(SQLite<br/>app.db + FTS5)]
-
-    subgraph web[React SPA]
-        DASH[Dashboard]
-        ONB[Onboarding]
-        SRC[Sources]
-        RUL[Rules]
-        DIG[Digest]
-    end
-
-    LLMP{{LLM-провайдер<br/>openai_compat / ollama / mock}}
-    EMBP{{Эмбеддинги<br/>sentence-transformers / provider / tfidf}}
-
-    RSS & REG & TG & ARCH --> ING --> PIPE
-    PIPE --> CLEAN --> EMB --> CLUST --> LLM --> RANK --> DB
-    EMB -.-> EMBP
-    LLM -.-> LLMP
-    SCHED --> PIPE
-    REST <--> DB
-    RANK <--> DB
-    web <--> REST
+flowchart LR
+    U[Браузер] --> NGINX[nginx]
+    NGINX -->|/| REACT[React static]
+    NGINX -->|/api| BE[backend<br/>FastAPI + Connect-RPC]
+    BE -->|INSERT tasks| PG[(Postgres<br/>данные + очередь задач)]
+    W[worker<br/>поллинг tasks] --> PG
+    W -->|claim + heartbeat| RD[(Redis<br/>только SET NX EX)]
+    W -->|t.me/s/&lt;channel&gt;| TG[Telegram web preview]
+    W -->|RSS/Atom| RSS[Ленты СМИ и регуляторов]
+    W -->|filter + news-maker| LLM{{LLM provider<br/>openai_compat / mock}}
 ```
 
-Ключевые архитектурные принципы:
+**Контейнеры** (`docker-compose.yml`): `frontend` (nginx), `backend`, `worker`, `postgres`, `redis`.
+`backend` и `worker` — один Docker-образ (`./backend`), разные команды запуска:
+`uvicorn app.main:app` и `python -m app.worker.loop`. React собирается multi-stage сборкой, статика
+кладётся в образ nginx; nginx отдаёт `/` из статики и проксирует `/api/` → `backend:8000`
+(через `resolver 127.0.0.11` + переменную в `proxy_pass`, иначе после рестарта backend'а будет 502).
 
-- **Разделение «что это» и «насколько это интересно».** LLM отвечает на первое (дорого, редко),
-  движок правил — на второе (дёшево, постоянно, без LLM).
-- **Событие — единица данных.** Всё, что видит пользователь и на что действуют правила, — это
-  `NewsItem`, агрегат первичных документов `RawDoc`.
-- **Идемпотентность и инкрементальность.** Повторный запуск конвейера не создаёт дубли и не
-  переобрабатывает уже обработанное.
-- **Оффлайн-режим — first-class.** `LLM_PROVIDER=mock` + локальные эмбеддинги + датасет `archive`
-  дают полный рабочий цикл без сети.
+**Транспорт — Connect поверх HTTP/JSON, без gRPC-сервера и grpc-web прокси.** Реализация —
+`backend/app/connect.py`: маршрут `POST /api/{package}.{Service}/{Method}`, реестр методов,
+разбор тела сгенерированным `_pb2`-классом, коды Connect → HTTP-статусы.
 
----
-
-## 2. Технологический стек
-
-| Слой | Выбор | Обоснование |
-|---|---|---|
-| Backend | Python 3.11, FastAPI, Uvicorn | зрелая экосистема парсинга и LLM; async-роуты |
-| ORM | SQLAlchemy 2.x | типизированные модели, миграции через Alembic (или `create_all` для прототипа) |
-| БД | SQLite + FTS5 | zero-config, полнотекстовый поиск и `bm25()` из коробки |
-| Планировщик | APScheduler (in-process) | не нужен отдельный воркер/Redis для прототипа |
-| RSS | `feedparser` | стандарт де-факто |
-| Извлечение текста | `trafilatura` | лучшее качество на рус. новостях, fallback `selectolax` |
-| Telegram | HTTP + `selectolax` парсинг `t.me/s/<channel>` | без авторизации и API-ключей |
-| Морфология | `pymorphy3` | лемматизация для regex-правил и TF-IDF-фолбэка |
-| Эмбеддинги (default) | `sentence-transformers`, `intfloat/multilingual-e5-small` | ~120 МБ, CPU, рус+англ, без ключа |
-| LLM | абстракция: OpenAI-совместимый / Ollama / mock | провайдер выбирается по ENV |
-| Frontend | React 18, Vite, TypeScript | быстрый старт, знакомо команде |
-| UI-kit | Mantine (или shadcn/ui) | готовые таблицы, формы, drawer, бейджи |
-| HTTP-клиент | TanStack Query + fetch | кэш, инвалидация, состояние загрузки |
-| Контейнеризация | Docker + docker-compose | один `up` для демо |
-
-Зависимости backend (`requirements.txt`, ориентир):
-`fastapi uvicorn[standard] sqlalchemy pydantic feedparser trafilatura selectolax httpx
-pymorphy3 scikit-learn sentence-transformers apscheduler python-multipart`.
+**Очередь задач — в Postgres, Redis только под локи.** Воркер поллит таблицу `tasks`, а не
+блокируется на чтении из Redis. Redis отвечает ровно за два вопроса: «кто из воркеров исполняет
+эту задачу» (`claim`) и «жив ли воркер» (`heartbeat`). Потеря Redis между прогонами не теряет
+данных.
 
 ---
 
-## 3. Модель данных
-
-### 3.1. ER-диаграмма
+## 3. Модель данных (Postgres)
 
 ```mermaid
 erDiagram
-    PROJECT ||--o{ SOURCE : "имеет"
-    PROJECT ||--o{ RAWDOC : "собирает"
-    PROJECT ||--o{ NEWSITEM : "формирует"
-    PROJECT ||--o{ RANKRULE : "настраивает"
-    SOURCE  ||--o{ RAWDOC : "поставляет"
-    NEWSITEM ||--o{ RAWDOC : "агрегирует"
-
-    PROJECT {
-        int id PK
-        string name
-        string goal
-        string industry
-        json categories
-        json tracked_entities
-        datetime period_from
-        string negative_prompt
-        bool strict_mode
-        string update_freq
-        int profile_version
-        datetime created_at
-    }
-    SOURCE {
-        int id PK
-        int project_id FK
-        string type
-        string url
-        string title
-        bool enabled
-        datetime last_fetched_at
-        json fetch_meta
-    }
-    RAWDOC {
-        int id PK
-        int project_id FK
-        int source_id FK
-        int news_item_id FK "nullable"
-        string url
-        string title
-        text body
-        datetime published_at
-        datetime fetched_at
-        string language
-        string content_hash
-        blob embedding "nullable"
-    }
-    NEWSITEM {
-        int id PK
-        int project_id FK
-        string title
-        text summary
-        json entities
-        string doc_type
-        string category
-        string importance
-        blob embedding
-        float score
-        json rule_hits
-        bool attention
-        string status
-        string user_feedback
-        string origin
-        json edited_fields
-        bool needs_resummarize
-        string cluster_key
-        datetime first_seen_at
-        datetime last_updated_at
-    }
-    RANKRULE {
-        int id PK
-        int project_id FK
-        string name
-        string kind
-        json when
-        string action
-        float weight
-        float threshold
-        string ref
-        blob ref_embedding "nullable"
-        bool enabled
-        bool protected
-        int position
-    }
+    PROJECTS ||--o{ RUNS : ""
+    PROJECTS ||--o{ NEWS : ""
+    PROJECTS ||--o{ MESSAGES : ""
+    PROJECTS ||--o{ SOURCE_CURSORS : ""
+    RUNS     ||--o{ MESSAGES : ""
+    RUNS     ||--o{ NEWS : ""
+    RUNS     ||--o{ TASKS : ""
 ```
 
-### 3.2. Перечисления
-
-| Поле | Значения |
-|---|---|
-| `Source.type` | `rss` \| `html_site` \| `telegram_web` \| `archive` \| `manual` |
-| `Project.update_freq` | `hourly` \| `few_daily` \| `daily` \| `manual` |
-| `NewsItem.doc_type` | `npa` \| `news` |
-| `NewsItem.category` | `регуляторика` \| `репутация` \| `конкуренты` \| `тренды` |
-| `NewsItem.importance` | `high` \| `medium` \| `low` |
-| `NewsItem.status` | `active` \| `hidden` |
-| `NewsItem.user_feedback` | `useful` \| `irrelevant` \| `null` |
-| `NewsItem.origin` | `collected` \| `manual` |
-| `RankRule.kind` | `field` \| `semantic` |
-| `RankRule.action` | `boost` \| `penalize` \| `pin` \| `hide` |
-
-### 3.3. Эскиз DDL и индексы
+Схема ведётся Alembic (`backend/migrations`), модели — `backend/app/database/models.py`.
 
 ```sql
-CREATE TABLE source (
-  id INTEGER PRIMARY KEY,
-  project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-  type TEXT NOT NULL,
-  url TEXT,
-  title TEXT,
-  enabled INTEGER NOT NULL DEFAULT 1,
-  last_fetched_at TEXT,
-  fetch_meta TEXT DEFAULT '{}'
+CREATE TABLE projects (
+  id VARCHAR PRIMARY KEY,                -- uuid4 строкой (как в proto)
+  name VARCHAR(255) NOT NULL,
+  topic VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP NOT NULL,
+  updated_at TIMESTAMP NOT NULL,
+  filters JSONB NOT NULL DEFAULT '[]',   -- список monitoring.v1.ProjectFilter в proto3-JSON
+  sources JSONB NOT NULL DEFAULT '[]'    -- список monitoring.v1.Source в proto3-JSON
 );
-CREATE INDEX ix_source_project ON source(project_id, enabled);
 
-CREATE TABLE raw_doc (
-  id INTEGER PRIMARY KEY,
-  project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-  source_id INTEGER NOT NULL REFERENCES source(id) ON DELETE CASCADE,
-  news_item_id INTEGER REFERENCES news_item(id) ON DELETE SET NULL,
-  url TEXT, title TEXT, body TEXT,
-  published_at TEXT, fetched_at TEXT NOT NULL,
-  language TEXT, content_hash TEXT NOT NULL,
-  embedding BLOB
+CREATE TABLE runs (
+  id VARCHAR PRIMARY KEY,
+  project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  state VARCHAR(50) NOT NULL DEFAULT 'RUN_STATE_STARTED',  -- имя значения enum RunState
+  created_at TIMESTAMP NOT NULL,
+  stats JSONB NOT NULL DEFAULT '{}'      -- форма monitoring.v1.RunStats
 );
-CREATE UNIQUE INDEX ux_rawdoc_hash ON raw_doc(project_id, content_hash);
-CREATE INDEX ix_rawdoc_newsitem ON raw_doc(news_item_id);
-CREATE INDEX ix_rawdoc_published ON raw_doc(project_id, published_at);
 
-CREATE TABLE news_item (
-  id INTEGER PRIMARY KEY,
-  project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-  title TEXT, summary TEXT, entities TEXT DEFAULT '{}',
-  doc_type TEXT, category TEXT, importance TEXT,
-  embedding BLOB,
-  score REAL DEFAULT 0, rule_hits TEXT DEFAULT '[]',
-  attention INTEGER DEFAULT 0, status TEXT DEFAULT 'active',
-  user_feedback TEXT, origin TEXT DEFAULT 'collected',
-  edited_fields TEXT DEFAULT '[]', needs_resummarize INTEGER DEFAULT 0,
-  cluster_key TEXT,
-  first_seen_at TEXT NOT NULL, last_updated_at TEXT NOT NULL
+-- Карточка события. 🔜 Обогащение (category/importance/doc_type/entities/tags),
+-- project_id и hidden добавляются в этом заходе.
+CREATE TABLE news (
+  id SERIAL PRIMARY KEY,
+  project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,  -- 🔜
+  run_id VARCHAR REFERENCES runs(id) ON DELETE CASCADE,   -- 🔜 NULL у карточек, добавленных руками
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  sources JSONB NOT NULL DEFAULT '[]',   -- ["https://t.me/ch/123", ...]
+  category   VARCHAR(40) NOT NULL DEFAULT 'NEWS_CATEGORY_UNSPECIFIED',    -- 🔜 имя значения enum
+  importance VARCHAR(40) NOT NULL DEFAULT 'NEWS_IMPORTANCE_UNSPECIFIED',  -- 🔜
+  doc_type   VARCHAR(30) NOT NULL DEFAULT 'DOC_TYPE_UNSPECIFIED',         -- 🔜
+  entities JSONB NOT NULL DEFAULT '{}',  -- 🔜 форма monitoring.v1.NewsEntities
+  tags     JSONB NOT NULL DEFAULT '[]',  -- 🔜
+  hidden BOOLEAN NOT NULL DEFAULT false, -- 🔜 скрыто из ленты, но не удалено
+  created_at TIMESTAMP NOT NULL DEFAULT now()  -- 🔜
 );
-CREATE INDEX ix_newsitem_feed ON news_item(project_id, status, score DESC);
-CREATE INDEX ix_newsitem_cluster ON news_item(project_id, cluster_key);
+CREATE INDEX ix_news_project_id ON news (project_id);  -- 🔜 лента строится по проекту, не по Run
 
-CREATE TABLE rank_rule (
-  id INTEGER PRIMARY KEY,
-  project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-  name TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'field',
-  "when" TEXT DEFAULT '[]', action TEXT NOT NULL, weight REAL DEFAULT 0,
-  threshold REAL, ref TEXT, ref_embedding BLOB,
-  enabled INTEGER NOT NULL DEFAULT 1, protected INTEGER NOT NULL DEFAULT 0,
-  position INTEGER DEFAULT 0
-);
-CREATE INDEX ix_rule_project ON rank_rule(project_id, enabled);
+-- Ниже — служебные таблицы, наружу в proto не выходят.
 
--- Полнотекстовый поиск: contentless FTS5, синхронизация триггерами
-CREATE VIRTUAL TABLE news_fts USING fts5(
-  title, summary, entity_names, body_concat,
-  content='news_item', content_rowid='id', tokenize='unicode61 remove_diacritics 2'
+-- 🔜 channel -> source_key, tg_msg_id становится NULLABLE: одна таблица обслуживает
+-- и Telegram (source_key = канал), и RSS (source_key = URL ленты).
+CREATE TABLE messages (
+  id SERIAL PRIMARY KEY,
+  project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  run_id     VARCHAR NOT NULL REFERENCES runs(id)     ON DELETE CASCADE,
+  source_key VARCHAR(255) NOT NULL,      -- 🔜 было channel
+  tg_msg_id BIGINT,                      -- 🔜 было NOT NULL; NULL для RSS
+  url TEXT NOT NULL,
+  text TEXT NOT NULL,
+  posted_at TIMESTAMP,
+  content_hash VARCHAR(64) NOT NULL,
+  relevant BOOLEAN,                      -- NULL до message-filter
+  CONSTRAINT uq_messages_hash UNIQUE (project_id, content_hash)   -- кросс-Run дедуп
 );
+
+CREATE TABLE source_cursors (
+  project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  source_key VARCHAR(255) NOT NULL,      -- 🔜 было channel
+  last_msg_id BIGINT,                    -- курсор Telegram
+  last_published_at TIMESTAMP,           -- 🔜 курсор RSS (у записей нет сквозного id)
+  PRIMARY KEY (project_id, source_key)
+);
+
+-- Очередь воркера. SELECT ... WHERE status='pending' не блокирует строку — несколько
+-- воркеров могут выбрать одну и ту же задачу в одном тике поллинга; кто её реально
+-- исполняет, решает Redis claim() (единственное, для чего Redis остался в системе).
+CREATE TABLE tasks (
+  id VARCHAR PRIMARY KEY,
+  run_id VARCHAR NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  kind VARCHAR(20) NOT NULL,             -- extract | compose
+  payload JSONB NOT NULL DEFAULT '{}',   -- 🔜 {"project_id","source_type","source_key"} для extract
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending | done
+  created_at TIMESTAMP NOT NULL
+);
+CREATE INDEX ix_tasks_run_id ON tasks(run_id);
+CREATE INDEX ix_tasks_created_at ON tasks(created_at);
+-- не больше одной compose-задачи на run, даже если несколько extract-задач
+-- прогона завершились почти одновременно в разных транзакциях
+CREATE UNIQUE INDEX uq_tasks_compose_per_run ON tasks(run_id) WHERE kind = 'compose';
 ```
 
-`entity_names` = плоская строка из `entities.who` + `entities.what`; `body_concat` = склейка
-`body` всех `RawDoc` события (для поиска по исходному тексту). Триггеры `AFTER INSERT/UPDATE/DELETE`
-на `news_item` и `raw_doc` поддерживают `news_fts` в актуальном состоянии.
+**Почему `filters`/`sources`/`entities`/`tags` — JSONB, а `category`/`importance` — строки.**
+JSONB хранит вложенные структуры ровно в форме proto3-JSON соответствующих сообщений, поэтому
+конвертация в `services/mappers.py` — это `ParseDict`/`MessageToDict`, без ручного перекладывания
+полей. Enum'ы же лежат отдельными строковыми колонками с именем значения (`Run.state` так работает
+с самого начала): так `WHERE category IN (...)` в фильтрах ленты остаётся обычным индексируемым
+условием, а не разбором JSON.
 
-### 3.4. Правила защиты от перезаписи
-
-При `PATCH /news/{id}` изменённые поля добавляются в `edited_fields`. `analyze.persist()` при
-повторной обработке пропускает поля из `edited_fields`. `profile_version` инкрементится при
-изменении `industry` / `tracked_entities` — это инвалидирует кэш саммари (см. §6.4).
+**Почему `news.project_id`, а не только `run_id`.** Лента и фильтры (§7) работают по проекту, а не
+по одному прогону; плюс карточка, добавленная руками, вообще не принадлежит никакому Run.
+Денормализованный `project_id` закрывает оба случая одной колонкой.
 
 ---
 
-## 4. Конвейер обработки
-
-### 4.1. Последовательность
+## 4. Жизненный цикл Run
 
 ```mermaid
 sequenceDiagram
-    participant T as Триггер (кнопка / APScheduler)
-    participant P as pipeline
-    participant I as ingestion
-    participant C as clean+dedup
-    participant E as embed
-    participant K as cluster
-    participant L as analyze (LLM)
-    participant R as ranking
-    participant DB as SQLite
+    participant FE as Frontend
+    participant BE as backend
+    participant RD as Redis
+    participant W as worker
+    participant SRC as t.me/s/ и RSS
+    participant LLM as LLM
 
-    T->>P: run(project_id)
-    P->>I: fetch(source) для каждого enabled источника
-    I-->>P: [RawItem] новее source.last_fetched_at
-    P->>C: normalize + language + content_hash
-    C->>DB: SELECT content_hash → отсев точных дублей
-    C-->>P: [RawDoc] уникальные
-    P->>E: embed(text) для каждого RawDoc
-    E-->>P: vectors
-    P->>K: assign_cluster(RawDoc, окно N дней)
-    K->>DB: поиск NewsItem по cluster_key / косинусу
-    K-->>P: news_item_id (существующий) | новый черновик
-    P->>L: analyze(cluster_texts + profile) для событий с needs_resummarize
-    L-->>P: AnalyzeResult (строгий JSON)
-    P->>DB: upsert NewsItem + RawDoc.news_item_id + news_fts
-    P->>R: rank(project) — правила по всем событиям
-    R->>DB: UPDATE score, rule_hits, attention
-    P-->>T: RunReport {collected, new_items, merged, elapsed_ms}
+    FE->>BE: POST /api/monitoring.v1.RunService/StartRun
+    BE->>BE: INSERT runs(state=RUN_STATE_STARTED)
+    loop по каждому активному источнику проекта
+        BE->>BE: INSERT tasks(kind=extract, payload={project,source_type,source_key})
+    end
+    BE-->>FE: StartRunResponse{run}
+
+    loop worker: раз в 2с SELECT tasks WHERE status='pending' LIMIT 20
+        W->>RD: SET claim:{job_id} NX EX ttl
+        alt claim получен
+            W->>W: UPDATE tasks SET status='done' (сразу, отдельным коммитом)
+            W->>SRC: Telegram: t.me/s/<channel>?before=... | RSS: GET <feed_url>
+            SRC-->>W: посты / записи ленты
+            W->>W: INSERT messages ON CONFLICT DO NOTHING (project_id, content_hash)
+            W->>W: UPSERT source_cursors (last_msg_id либо last_published_at)
+            W->>W: SELECT COUNT(*) tasks WHERE run_id=... AND kind='extract' AND status='pending'
+            opt счётчик == 0
+                W->>W: INSERT tasks(kind=compose) ON CONFLICT DO NOTHING
+            end
+        end
+    end
+
+    W->>W: compose: SELECT * FROM messages WHERE run_id={run}
+    alt сообщений нет
+        W->>W: runs.state=RUN_STATE_DONE, stats={collected:0,...}
+    else
+        W->>LLM: message-filter, батчи по FILTER_BATCH -> relevant true/false
+        W->>LLM: news-maker, батчи по NEWSMAKER_BATCH -> группы + саммари + обогащение
+        W->>W: INSERT news(project_id, sources, category, importance, doc_type, entities)
+        W->>W: runs.state=RUN_STATE_DONE, stats={collected, relevant, news}
+    end
+
+    FE->>BE: GetRun (polling каждые 2 c) / ListNews (лента с фильтрами)
+    BE-->>FE: карточки новостей
 ```
 
-### 4.2. Этапы
+Ошибка на этапе compose (недоступный LLM, невалидный JSON после ретраев) → `RUN_STATE_FAILED`
+и `stats.error`; воркер продолжает работу.
 
-| # | Этап | Модуль | Вход → выход |
-|---|---|---|---|
-| 1 | Сбор (инкрементальный) | `ingestion/*` | источник → `RawItem[]` новее `last_fetched_at` |
-| 2 | Жёсткий отбор | `pipeline` + `dedup` | отсев по периоду, языку, `content_hash` |
-| 3 | Очистка | `clean` | HTML → чистый `body`, язык, `content_hash` |
-| 4 | Эмбеддинг | `embed` | `body` → вектор (кэшируется на `RawDoc`) |
-| 5 | Кластеризация | `cluster` | `RawDoc` → `news_item_id` (существующий/новый) |
-| 6 | Саммаризация | `analyze` + `llm/*` | тексты кластера + профиль → `AnalyzeResult` |
-| 7 | Персист | `pipeline` | `NewsItem` + `SourceRef` + `news_fts` |
-| 8 | Ранжирование | `ranking/engine` | правила → `score`, `rule_hits`, `attention` |
+### Redis-ключи
 
-### 4.3. Идемпотентность
+Очередь задач — таблица `tasks` в Postgres (§3), не Redis. Redis хранит только два вида ключей —
+оба живут секунды-минуты, поэтому Redis можно полностью потерять между прогонами без потери данных.
 
-- Точные дубли отсекаются `UNIQUE(project_id, content_hash)`.
-- Событие не пересаммаризируется, если `needs_resummarize = 0` и `profile_version` не изменился.
-- `last_fetched_at` обновляется только после успешного персиста этапа.
-- Ранжирование — чистая функция от `(NewsItem, RankRule[])`, безопасно повторять.
-
----
-
-## 5. Модуль Ingestion
-
-### 5.1. Интерфейс
-
-```python
-class RawItem(TypedDict):
-    url: str
-    title: str
-    html: str | None       # исходный HTML/текст
-    text: str | None        # уже чистый текст, если источник его даёт
-    published_at: datetime | None
-
-class Connector(Protocol):
-    type: str
-    def fetch(self, source: Source, since: datetime | None) -> Iterable[RawItem]: ...
-    def preview(self, url: str) -> list[RawItem]:   # для проверки до сохранения
-        ...
-```
-
-### 5.2. Реализации
-
-| Коннектор | Как работает | Примечания |
+| Ключ | Тип | Назначение |
 |---|---|---|
-| `rss` | `feedparser.parse(url)`; `published_parsed` → `published_at`; тело из `summary`/`content` | самый надёжный; ≥2 источника из MVP закрываются здесь |
-| `html_site` | GET страницы листинга → ссылки статей → `trafilatura.extract` по каждой | по домену — свой селектор списка (`config/regulators.py`); начинаем с тех регуляторов, у кого есть RSS (ЦБ РФ) |
-| `telegram_web` | GET `https://t.me/s/<channel>` → `selectolax` → `.tgme_widget_message` (текст, дата, ссылка) | без авторизации; пагинация через `?before=<id>` |
-| `archive` | чтение `data/dataset/*.json` (или `.md` с фронтматтером) | источник демо; `published_at` из данных |
-| `manual` | не поллит; события создаются через `POST /news` | `origin = manual` |
+| `claim:{job_id}` | string, `SET NX EX ttl` | «взято в работу» — несколько воркеров могут выбрать одну и ту же pending-строку из `tasks` (обычный `SELECT`, без блокировки); claim решает, кто её реально исполняет. `ttl` = `CLAIM_TTL_EXTRACT` (600с) или `CLAIM_TTL_COMPOSE` (1800с) |
+| `worker:heartbeat` | string, `SET EX 15` | обновляется на каждом тике поллинга; `/api/health` считает воркер живым, пока ключ не истёк |
 
-### 5.3. Инкрементальность
+`job_id`: `"{run_id}:{source_key}"` для extract, `"compose:{run_id}"` для compose.
 
-`since = source.last_fetched_at` (или `project.period_from` при первом сборе). Коннектор фильтрует
-по `published_at > since`; если у источника нет дат — берём всё и полагаемся на `content_hash`.
-После успешного прохода: `source.last_fetched_at = max(published_at, now())`.
+### Отказоустойчивость
 
-### 5.4. Пресет источников
-
-`data/seeds/sources.json` — ≥5 источников разных типов для быстрого старта проекта в онбординге
-(2 RSS СМИ + 1 сайт регулятора + 1 Telegram + archive). Точный список — открытый вопрос (см.
-[`REQUIREMENTS.md` §6](./REQUIREMENTS.md#6-открытые-вопросы)).
-
----
-
-## 6. Модуль Processing
-
-### 6.1. `clean.py`
-
-- извлечение основного текста: `trafilatura.extract(html, include_comments=False)`;
-- нормализация пробелов, удаление буллетов рекламы/подписки (`config/boilerplate.py`);
-- язык: `trafilatura`-метаданные или простая эвристика по кириллице;
-- `content_hash = sha1(lower(strip(re.sub(r'\W+',' ', text)))[:2000])`.
-
-### 6.2. `dedup.py` (жёсткий уровень)
-
-Точные/технические дубли: совпадение `content_hash` в пределах проекта → `RawItem` отбрасывается
-(в лог `RunReport.merged`). Near-duplicate обрабатывается на этапе кластеризации (§6.4).
-
-### 6.3. `embed.py`
-
-```python
-class Embedder(Protocol):
-    dim: int
-    def encode(self, texts: list[str]) -> np.ndarray: ...   # (n, dim), L2-normalized
-```
-
-| Провайдер (`EMBED_PROVIDER`) | Реализация |
-|---|---|
-| `local` (default) | `SentenceTransformer("intfloat/multilingual-e5-small")`, префикс `"query: "` |
-| `provider` | `POST {LLM_BASE_URL}/embeddings` OpenAI-совместимо |
-| `tfidf` | `TfidfVectorizer(ngram_range=(1,2))` по корпусу проекта + леммы `pymorphy3`; фит при первом вызове, инкрементальный `transform` дальше |
-
-Вектор `RawDoc` кэшируется в `raw_doc.embedding`. Вектор `NewsItem` = среднее векторов его
-`RawDoc` **после** саммаризации пересчитывается по `title + summary + entities` и пишется в
-`news_item.embedding` (используется semantic-правилами, §7.3).
-
-### 6.4. `cluster.py` (событийная кластеризация)
-
-Цель: сообщения об одном факте из разных источников → один `NewsItem`.
-
-Алгоритм для каждого нового `RawDoc` (в хронологическом порядке):
-
-1. **Кандидаты:** `NewsItem` того же проекта с `first_seen_at` в окне **N = 3 дня** от
-   `RawDoc.published_at`.
-2. **Быстрый ключ:** `cluster_key = normalize(title)[:64]` — точное совпадение → сразу в кластер.
-3. **Семантика:** `sim = max cos(RawDoc.embedding, candidate.centroid)`.
-   - `sim ≥ 0.82` → присоединить к кластеру, `news_item.needs_resummarize = 1`;
-   - `0.62 ≤ sim < 0.82` → присоединить, если ещё совпадает ≥1 именованная сущность
-     (`entities.who`) или ≥3 общих леммы в заголовке;
-   - иначе → новый `NewsItem`-черновик (`needs_resummarize = 1`, `cluster_key` от заголовка).
-4. `centroid` кластера пересчитывается инкрементально.
-
-Пороги вынесены в конфиг (`CLUSTER_SIM_HIGH`, `CLUSTER_SIM_LOW`, `CLUSTER_WINDOW_DAYS`) —
-подбираются на оффлайн-датасете.
-
-### 6.5. `llm/` — провайдер
-
-```python
-class LLMProvider(Protocol):
-    def complete_json(self, system: str, user: str, schema: dict) -> dict: ...
-```
-
-| `LLM_PROVIDER` | Реализация |
-|---|---|
-| `openai_compat` | `POST {LLM_BASE_URL}/chat/completions`, `response_format={"type":"json_schema",...}`; ретрай с почин­кой JSON |
-| `ollama` | `POST {OLLAMA_URL}/api/chat`, `format: "json"` |
-| `mock` (default) | без сети: экстрактивное саммари (топ-3 предложения по TF-IDF из объединённого текста кластера) + категоризация/тип/важность по словарям ключевых слов; возвращает валидный `AnalyzeResult` |
-
-### 6.6. `analyze.py` — контракт
-
-**Вход:** профиль проекта (`industry`, `tracked_entities`, `negative_prompt`) + конкатенация
-текстов всех `RawDoc` кластера (с маркерами источников).
-
-**System-промпт (суть):** «Ты аналитик отрасли `{industry}`. Особый интерес: `{tracked_entities}`.
-Тебе даны сообщения об одном событии из разных источников. Верни ОДНУ непротиворечивую карточку
-строго по JSON-схеме, без повторов фактов. Саммари 3–5 предложений, по существу, с фокусом на
-последствия для отрасли и указанных компаний.»
-
-**Выход — `AnalyzeResult` (Pydantic, строгая JSON-схема):**
-
-```json
-{
-  "title": "string",
-  "summary": "string (3–5 предложений)",
-  "entities": {
-    "who": ["string"],
-    "what": "string",
-    "when": "string (ISO-дата или словесно)",
-    "consequences": "string"
-  },
-  "doc_type": "npa | news",
-  "category": "регуляторика | репутация | конкуренты | тренды",
-  "importance": "high | medium | low"
-}
-```
-
-Больше полей нет (см. [`REQUIREMENTS.md` Р5](./REQUIREMENTS.md#р5-минимальный-structured-output-llm)).
-
-**Кэш:** ключ = `sha1(sorted(content_hash кластера) + profile_version)`. Попадание → LLM не
-вызывается. Промах или `needs_resummarize=1` → вызов, затем `needs_resummarize=0`.
-
-**Персист:** поля из `edited_fields` события не перезаписываются.
+- воркер умер посреди задачи → `claim` истекает по TTL, задача осталась в Postgres и будет
+  подобрана снова (кроме доли секунды между claim и `UPDATE status='done'`);
+- Redis целиком недоступен → `/api/health` покажет `degraded`, но очередь (`tasks`) не теряется —
+  обработка продолжится, как только Redis вернётся;
+- один источник недоступен (канал без веб-превью, отвалившаяся лента) → ошибка изолирована в его
+  extract-задаче: `msgs = []`, предупреждение в лог, остальные источники прогона отрабатывают;
+- «завис» Run (в `RUN_STATE_STARTED` дольше 90 с) → фронт показывает баннер с кнопкой перезапуска;
+- ошибка LLM в compose → `RUN_STATE_FAILED`, `stats.error`, новости не создаются;
+- сетевая ошибка/429/5xx к LLM → ретрай с экспоненциальной паузой (1/2/4 с), отдельно от ретрая
+  на невалидный JSON.
 
 ---
 
-## 7. Модуль Ranking
+## 5. Источники (ingestion)
 
-Балл события = **сумма весов сработавших правил проекта**. Без ML, без скрытых факторов.
-Пересчёт всей ленты — один проход, `O(события × правила)`, без LLM, < 1 c на сотнях событий.
+Каждый источник в проекте — это `monitoring.v1.Source` (§10). Тип определяет коннектор,
+`source_key` — ключ курсора и дедупа:
 
-```python
-def rank(item: NewsItem, rules: list[RankRule]) -> tuple[float, list[Hit], bool, bool]:
-    score, hits, pinned, hidden = 0.0, [], False, False
-    for rule in rules:                       # protected-правила идут первыми
-        delta = evaluate(rule, item)          # None если не сработало
-        if delta is None:
-            continue
-        hits.append(Hit(rule.name, rule.action, delta))
-        if rule.action == "boost":     score += rule.weight
-        elif rule.action == "penalize": score -= rule.weight
-        elif rule.action == "pin":      pinned = True
-        elif rule.action == "hide":     hidden = True
-    if pinned:
-        score = max(score, PIN_FLOOR)          # 0.6 по умолчанию
-    return score, hits, pinned, hidden
-```
-
-### 7.1. Правило `kind: "field"`
-
-```jsonc
-{
-  "name": "Понижать слухи",
-  "kind": "field",
-  "when": [ { "field": "summary", "op": "regex", "value": "по слухам|неофициально|источник сообщил" } ],
-  "action": "penalize",
-  "weight": 3,
-  "enabled": true
-}
-```
-
-**Доступные `field`:** `importance`, `doc_type`, `category`, `entities.who` (list),
-`title`, `summary`, `body` (объединённый текст кластера), `source_id` (any of),
-`age_days` (число), `source_count` (число).
-
-**Операторы:** `eq`, `ne`, `in`, `contains`, `regex`, `lt`, `gt`.
-Текстовые операторы `contains`/`regex` применяются к леммам (`pymorphy3`) и к оригиналу.
-`when` — список условий, по умолчанию `AND`; флаг `"any": true` → `OR`.
-
-### 7.2. Стартовый набор правил (создаётся с проектом)
-
-| name | kind | when | action / weight |
+| Тип | `source_key` | Коннектор | Курсор |
 |---|---|---|---|
-| Важность: высокая | field | `importance == high` | boost / 3 |
-| Важность: средняя | field | `importance == medium` | boost / 1 |
-| Своя компания в фокусе | field | `entities.who contains <tracked_entity>` | boost / 3 |
-| Понижать слухи | field | `summary\|body regex «по слухам\|неофициально\|неподтвержд»` | penalize / 3 |
-| Исключить тему ИИ | field | `title\|summary regex «искусственн\|нейросет\|\bИИ\b»` | penalize / 4 |
-| Устаревшее ниже | field | `age_days > 7` | penalize / 2 |
-| Стоп-темы пользователя | field | `summary\|body contains <леммы из negative_prompt>` | penalize / 3 |
+| `SOURCE_TYPE_TELEGRAM` ✅ | имя канала (`cit_gov`) | `app/ingestion/telegram_web.py` — публичное веб-превью `t.me/s/<channel>`, без ключей и авторизации, пагинация `?before=<id>` | `last_msg_id` |
+| `SOURCE_TYPE_RSS` 🔜 | URL ленты | `app/ingestion/rss.py` — `httpx` + `feedparser`, HTML в описании чистится `selectolax` | `last_published_at` |
 
-«Исключить тему ИИ» создаётся только если пользователь отметил это в онбординге. Любое правило
-удаляется/редактируется.
+Оба коннектора возвращают однородный список записей с полями `url`, `text`, `posted_at`,
+`content_hash`; дальше конвейер не различает, откуда материал пришёл. Дедупликация —
+`UNIQUE(project_id, content_hash)`: одинаковый текст не обрабатывается повторно ни между
+прогонами, ни между источниками (перепечатка одной новости в двух лентах схлопывается).
 
-### 7.3. Правило `kind: "semantic"`
+**Почему RSS покрывает и СМИ, и регуляторов.** Чек-лист требует три категории источников
+(СМИ / сайты регуляторов / Telegram). Регуляторы, нужные для демо, публикуют RSS — поэтому
+категория источника это *ярлык* (`Source.label`), а не отдельная технология парсинга.
+Скрейпинг произвольного HTML регуляторов ⏭ — он хрупок и не нужен для покрытия требования.
 
-```jsonc
-{
-  "name": "Близость к теме проекта",
-  "kind": "semantic",
-  "ref": "субсидии и регулирование экспорта зерна в РФ",
-  "action": "boost",
-  "weight": 4,
-  "threshold": 0.35
-}
-```
+**Набор источников для демо** (6 источников, 3 категории). URL проверены **из контейнера**, а не
+только с хоста — см. предупреждение ниже:
 
-`sim = cos(news_item.embedding, rule.ref_embedding)` (`ref_embedding` считается и сохраняется при
-создании/изменении правила; по умолчанию `ref` = строка профиля проекта).
-
-| action | эффект |
-|---|---|
-| `boost` | `score += weight * sim` |
-| `penalize` | `score -= weight * (1 - sim)` |
-| `hide` | `sim < threshold` → событие вне ленты |
-
-### 7.4. Защитные правила (`protective.py`)
-
-Инжектятся в начало списка как `protected=1`, недоступны для отключения/удаления через API:
-
-| условие | действие |
-|---|---|
-| `doc_type == npa` И `body regex «вступает в силу\|штраф\|ответственность\|проверк\|надзор\|суд»` | `pin` |
-| `category == репутация` И `body regex «отзыв\|расследован\|иск\|утечк\|бойкот\|претензи»` | `pin` |
-| `entities.who` пересекается со списком «НПА на сопровождении» проекта | `pin` |
-
-Пользователь может добавить свои `pin`/`hide`, но не снять `protected`.
-
-### 7.5. Порядок ленты
-
-```
-[ Требует внимания ]  = { attention == true }  сортировка: score desc, затем published desc
-[ Основная лента ]    = { status == active, не hidden-правилом }  сортировка: score desc,
-                          тай-брейк: age asc, затем source_count desc
-[ Скрытое ]           доступно по тумблеру: status == hidden ИЛИ спрятано hide-правилом
-```
-
-`strict_mode = true`: события с `score < STRICT_THRESHOLD` (0.25) и без `attention` уходят в
-«Скрытое». Данные не удаляются никогда.
-
-### 7.6. Временный просмотр
-
-`POST /projects/{id}/news/preview-rank` принимает `rules_override` (полный или добавочный набор) и
-возвращает ленту, посчитанную с этими правилами, **ничего не сохраняя**. Используется страницей
-Rules (предпросмотр) и полем «показать по смыслу» на дашборде.
-
----
-
-## 8. HTTP API
-
-Базовый префикс `/api`. Формат ошибок — `{ "detail": "..." }`. Даты — ISO-8601 UTC.
-
-### 8.1. Проекты
-
-| Метод | Путь | Тело / параметры | Ответ |
-|---|---|---|---|
-| POST | `/projects` | `ProjectCreate` | `Project` (+ стартовые правила) |
-| GET | `/projects/{id}` | — | `Project` |
-| PATCH | `/projects/{id}` | `ProjectUpdate` | `Project`; при смене `industry`/`tracked_entities` → `profile_version++` |
-| POST | `/projects/{id}/collect` | `{ "since": "manual" \| ISO \| null }` | `RunReport` |
-| POST | `/projects/{id}/rerank` | — | `{ "updated": n, "elapsed_ms": t }` |
-| GET | `/projects/{id}/stats` | — | `Stats` |
-
-```jsonc
-// ProjectCreate
-{
-  "name": "Мониторинг GS Labs",
-  "goal": "репутация + регуляторика в АПК",
-  "industry": "агропромышленный комплекс",
-  "categories": ["регуляторика", "репутация", "конкуренты", "тренды"],
-  "tracked_entities": ["GS Labs", "АО ГС"],
-  "period_from": "2026-08-27T00:00:00Z",
-  "negative_prompt": "не интересуют вакансии и локальные происшествия",
-  "exclude_ai_topic": true,
-  "strict_mode": false,
-  "update_freq": "daily",
-  "source_ids_from_seed": [1,2,3,4,5]
-}
-
-// RunReport
-{
-  "collected": 63, "unique": 58, "merged_exact": 5,
-  "new_items": 34, "updated_items": 6, "resummarized": 34,
-  "llm_calls": 34, "cache_hits": 0, "elapsed_ms": 28740
-}
-
-// Stats (для MetricBar)
-{
-  "raw_docs": 63, "news_items": 34,
-  "relevant": 18, "noise_hidden": 12, "attention": 4,
-  "last_run": { "elapsed_ms": 28740, "at": "2026-09-03T12:10:00Z" }
-}
-```
-
-### 8.2. Источники
-
-| Метод | Путь | Тело | Ответ |
-|---|---|---|---|
-| GET | `/projects/{id}/sources` | — | `Source[]` |
-| POST | `/sources` | `SourceCreate` `{project_id,type,url,title?}` | `Source` |
-| PATCH | `/sources/{id}` | `{title?,enabled?}` | `Source` |
-| DELETE | `/sources/{id}` | — | `204` (события остаются, помечаются `source detached`) |
-| POST | `/sources/preview` | `{type,url}` | `RawItem[]` (до 10, без сохранения) |
-
-### 8.3. События (лента)
-
-| Метод | Путь | Параметры / тело | Ответ |
-|---|---|---|---|
-| GET | `/projects/{id}/news` | `category, importance, doc_type, source_id, date_from, date_to, q, status, section` | `NewsListResponse` |
-| GET | `/news/{id}` | — | `NewsItemFull` |
-| PATCH | `/news/{id}` | `{title?,summary?,category?,importance?,doc_type?,entities?}` | `NewsItemFull` (поля → `edited_fields`) |
-| POST | `/news/{id}/hide` | `{hidden: true\|false}` | `NewsItemFull` |
-| POST | `/news/{id}/feedback` | `{value: "useful"\|"irrelevant"\|null}` | `204` |
-| POST | `/news` | `NewsManualCreate` | `NewsItemFull` (`origin=manual`) |
-| POST | `/projects/{id}/news/preview-rank` | `{rules_override:[Rule], mode:"replace"\|"append"}` | `NewsListResponse` (не сохраняется) |
-
-```jsonc
-// NewsListResponse item
-{
-  "id": 812,
-  "title": "ЦБ ужесточил требования к раскрытию для эмитентов АПК",
-  "summary": "…",
-  "doc_type": "npa",
-  "category": "регуляторика",
-  "importance": "high",
-  "score": 8.4,
-  "attention": true,
-  "status": "active",
-  "published_at": "2026-09-01T09:00:00Z",
-  "sources": [
-    {"source_id": 3, "title": "ЦБ РФ", "url": "https://cbr.ru/…", "published_at": "…"},
-    {"source_id": 7, "title": "TG: Регуляторка", "url": "https://t.me/…", "published_at": "…"}
-  ],
-  "source_count": 2,
-  "rule_hits": [
-    {"rule": "Важность: высокая", "action": "boost", "delta": 3},
-    {"rule": "Требует внимания: НПА-комплаенс", "action": "pin", "delta": null},
-    {"rule": "Близость к теме проекта", "action": "boost", "delta": 2.4}
-  ]
-}
-```
-
-### 8.4. Правила
-
-| Метод | Путь | Тело | Ответ |
-|---|---|---|---|
-| GET | `/projects/{id}/rules` | — | `Rule[]` (включая `protected`, read-only) |
-| POST | `/projects/{id}/rules` | `RuleCreate` | `Rule` + авто-`rerank` |
-| PATCH | `/rules/{id}` | `RuleUpdate` | `Rule` + авто-`rerank` (запрет на `protected`) |
-| DELETE | `/rules/{id}` | — | `204` + авто-`rerank` (запрет на `protected`) |
-
-### 8.5. Дайджест
-
-| Метод | Путь | Параметры | Ответ |
-|---|---|---|---|
-| GET | `/projects/{id}/digest` | `period=24h\|7d\|30d\|custom&from&to&format=json\|md` | `Digest` или `text/markdown` |
-
-`Digest`: события за период, сгруппированные по `category`, внутри — по `importance`; каждая
-строка = заголовок + саммари + ссылки на источники.
-
----
-
-## 9. Frontend
-
-### 9.1. Роутинг
-
-| Путь | Страница | Назначение |
+| Категория | Источник | URL / канал |
 |---|---|---|
-| `/onboarding` | Onboarding | визард создания проекта (3 шага) |
-| `/` | Dashboard | лента событий, фильтры, семантический фокус, метрика |
-| `/news/:id` | NewsDrawer (overlay) | карточка события, редактирование, объяснение позиции |
-| `/sources` | Sources | CRUD источников + предпросмотр |
-| `/rules` | Rules | CRUD правил + предпросмотр эффекта |
-| `/digest` | Digest | дайджест за период + экспорт |
+| СМИ | ТАСС | `https://tass.ru/rss/v2.xml` |
+| СМИ | РБК | `https://rssexport.rbc.ru/rbcnews/news/30/full.rss` |
+| Регулятор | Правительство РФ | `http://government.ru/all/rss/` |
+| Регулятор | ФНС России | `https://www.nalog.gov.ru/rn77/rss/` |
+| Telegram | ЦИТ | `cit_gov` |
+| Telegram | АРПП «Отечественный софт» | `arppsoft` |
 
-### 9.2. Компоненты
-
-| Компонент | Назначение |
-|---|---|
-| `MetricBar` | `Stats` в виде плашки: собрано → событий → релевантно / шум / внимание / время |
-| `SemanticFocus` | поле «показать по смыслу: ___» → `preview-rank` с временным `semantic` `hide` |
-| `AttentionBlock` | секция «Требует внимания» над лентой |
-| `FeedFilters` | категория, важность, тип, источник, даты, поиск (`q`) |
-| `NewsCard` | заголовок, саммари, `ImportanceBadge`, `DocTypeBadge`, `«N источников»`, дата |
-| `RuleHits` | список сработавших правил с дельтами — «почему здесь» |
-| `SourceList` | все первоисточники события со ссылками |
-| `RuleForm` | конструктор правила: `kind` (`field`/`semantic`), условие, действие, вес |
-| `SourceForm` | добавление источника с кнопкой «Проверить» (`/sources/preview`) |
-
-### 9.3. Состояние
-
-- Серверное состояние — TanStack Query; инвалидация ключей `news`/`stats` после `collect`,
-  `rerank`, `PATCH /news`, любых операций с правилами.
-- Локальное состояние фильтров — в URL query params (шарится ссылкой, переживает перезагрузку).
-- Семантический фокус — локальный стейт страницы, не сохраняется.
+> ⚠️ **Проверять доступность источника нужно из контейнера, а не с хоста.**
+> `https://www.cbr.ru/rss/RssPress` (Банк России) отвечает с хоста, но из контейнера TCP-соединение
+> до `185.178.208.7:443` уходит в таймаут — DNS при этом резолвится верно. Это ограничение сетевого
+> окружения, не код. Поэтому регуляторов в демо представляют Правительство РФ и ФНС (оба — из
+> списка регуляторов в самом чек-листе организаторов).
+>
+> Другие проверенные варианты: Интерфакс (`https://www.interfax.ru/rss.asp`) и Коммерсант
+> (`https://www.kommersant.ru/RSS/news.xml`) — рабочие, как запасные СМИ. Не работают из
+> контейнера: Роспотребнадзор и Минэкономразвития (таймаут), Госдума (404 на `/news/rss/`),
+> Минцифры (200, но без `<item>`). `iz.ru` отдаёт 403 даже с браузерным User-Agent.
 
 ---
 
-## 10. Планировщик
+## 6. Обработка (LLM)
 
-`scheduler.py` на APScheduler (`BackgroundScheduler`, `MemoryJobStore`).
+Провайдер за абстракцией `app/llm/provider.py`, `LLM_PROVIDER = openai_compat | mock`.
+`openai_compat` рассчитан на OpenAI-совместимые API; используется **RouterAI**
+(`LLM_BASE_URL=https://routerai.ru/api/v1`, модель `deepseek/deepseek-v4-flash-0731`).
+Запрос — `response_format: {"type":"json_object"}`, починка JSON с ретраем ×3, отдельно —
+сетевой ретрай на транспортные ошибки и 429/5xx. Оффлайн-демо — на `mock`.
 
-- При старте приложения и при изменении `project.update_freq` — пересоздаётся job проекта:
-  `hourly` → каждый час, `few_daily` → каждые 4 часа, `daily` → раз в сутки в 07:00,
-  `manual` → job не создаётся.
-- Job вызывает `pipeline.run(project_id)` в отдельном потоке; параллельные запуски одного проекта
-  сериализуются мьютексом (`per-project lock`).
-- Ручной `POST /collect` использует тот же lock — двойной обработки не будет.
-- Ошибка сбора одного источника не роняет весь прогон: логируется в `RunReport.errors[]`,
-  остальные источники обрабатываются.
+### message-filter (батч `FILTER_BATCH` = 30) ✅
+
+```
+system: Ты фильтр релевантности для мониторинга темы «{topic}».
+        Дополнительные указания пользователя: {filters[].prompt, через "; "}.
+        Для каждого сообщения верни relevant: true|false. Только JSON.
+user:   [{"i":0,"text":"..."}, ...]
+schema: {"results":[{"i":int,"relevant":bool}]}
+```
+
+`mock`: `relevant = любая лемма из topic присутствует в тексте` (pymorphy3).
+
+### news-maker (батчи `NEWSMAKER_BATCH` = 12, вход обрезан до `NEWSMAKER_CAP` свежих) ✅ + 🔜 обогащение
+
+```
+system: Сгруппируй сообщения об одном и том же событии и сделай из каждой группы новость.
+        Тема мониторинга: «{topic}». Заголовок — короткий, content — 3–5 предложений по сути.
+        Плюс для каждой группы: категория, важность, тип документа и сущности. Только JSON.
+user:   [{"i":0,"channel":"...","text":"..."}, ...]
+schema: {"news":[{"title":str, "content":str, "message_indices":[int],
+                  "category":"регуляторика|репутация|конкуренты|тренды",   // 🔜
+                  "importance":"high|medium|low",                          // 🔜
+                  "doc_type":"npa|news",                                    // 🔜
+                  "entities":{"who":str,"what":str,"when":str,"consequences":str}}]}  // 🔜
+```
+
+Схема ответа соответствует решению Р5 из `REQUIREMENTS.md` — минимальный structured output,
+никаких дополнительных флагов.
+
+Ответ обёрнут в объект (`{"news":[...]}`), т.к. `response_format: json_object` не допускает голый
+массив. `url` в запрос не передаём — восстанавливаем по индексу `i` при записи.
+
+**Почему батчами.** На входе из ~30 сообщений reasoning-модель тратила 21k reasoning-токенов и
+возвращала результат лишь по 1–2 сообщениям. Режем вход на `NEWSMAKER_BATCH` (12), индексы внутри
+батча сдвигаем обратно в общий список. Замер на 6 каналах: было `relevant 28 → news 1`, стало
+`relevant 29 → news 27`.
+
+**Перевод значений LLM в enum'ы контракта** 🔜 — в одном месте (`app/llm/schema.py`), чтобы
+провайдеры говорили на языке предметной области (русские названия категорий, как в чек-листе), а
+контракт хранил канонические имена enum'ов. Неизвестное/битое значение → `*_UNSPECIFIED`, а не
+падение.
+
+**`entities.when` считается детерминированно** 🔜: если LLM вернул непустое значение — берём его
+(он может дать более информативное «вступает в силу с 1 марта»), иначе подставляем дату самого
+раннего сообщения группы, которая и так известна. Так поле корректно заполняется и на `mock`,
+который сущности извлекать не умеет.
+
+**`mock` без сети** 🔜: группировка по совпадению первых 4 слов; категория и важность — по
+словарям ключевых слов через леммы (pymorphy3), `doc_type=npa` при словах «закон/приказ/
+постановление/указ/кодекс», иначе `news`. Грубо, но детерминированно и демонстрируемо офлайн.
 
 ---
 
-## 11. Конфигурация
+## 7. API — Connect-RPC из proto
 
-Все параметры — через ENV (`.env`, читается `pydantic-settings`).
+Транспорт: **Connect поверх HTTP/JSON**. Адрес метода складывается из полного имени сервиса
+в proto и имени RPC:
+
+```
+POST /api/{package}.{Service}/{Method}
+Content-Type: application/json
+тело      — сообщение Request  в proto3-JSON
+200       — сообщение Response в proto3-JSON
+ошибка    — HTTP-код + {"code": "...", "message": "..."}
+```
+
+| RPC | Назначение | Статус |
+|---|---|---|
+| `ProjectService.CreateProject` | создать проект (тема, фильтры, источники) | ✅ |
+| `ProjectService.GetProject` / `ListProjects` | чтение | ✅ |
+| `ProjectService.UpdateProject` | правка полей по `FieldMask`; **управление источниками** идёт сюда: `update_mask: ["sources"]` с новым массивом | ✅ |
+| `ProjectService.DeleteProject` | удалить проект (каскадом runs/news/messages/tasks) | ✅ |
+| `RunService.StartRun` / `GetRun` / `ListRuns` | запуск обновления и его результат | ✅ |
+| `NewsService.ListNews` | **лента проекта с фильтрами и поиском** | 🔜 |
+| `NewsService.UpdateNews` | правка карточки: заголовок, саммари, категория, важность, теги, скрытие | 🔜 |
+| `NewsService.CreateNews` | ручное добавление материала | 🔜 |
+
+Плюс служебный `GET /api/health` — вне контракта, инфраструктурный (БД, Redis, живость воркера,
+реестр зарегистрированных RPC).
+
+Коды ошибок Connect → HTTP: `invalid_argument` 400, `not_found` 404, `failed_precondition` 412,
+`unimplemented` 501, `internal` 500.
+
+### Фильтры и поиск (`ListNews`) 🔜
+
+Фильтрация идёт по проекту, а не по одному прогону: `project_id` + категории (OR), важности (OR),
+источник, диапазон дат, текстовый запрос `q`, флаг `include_hidden` (по умолчанию скрытые не
+показываются). Поиск — `ILIKE` по заголовку и тексту; на объёме демо этого достаточно, FTS ⏭.
+Пагинация — keyset по `news.id` (`ORDER BY id DESC`, `WHERE id < page_token`).
+
+```jsonc
+// CreateProject
+{ "name": "ИТ-мониторинг", "topic": "цифровые технологии, гранты",
+  "filters": [{"prompt": "не интересны поздравления"}],
+  "sources": [{"type": "SOURCE_TYPE_TELEGRAM", "telegram": "cit_gov", "label": "ЦИТ"},
+              {"type": "SOURCE_TYPE_RSS", "rssUrl": "https://www.cbr.ru/rss/RssPress",
+               "label": "Банк России (регулятор)"}] }
+
+// ListNews
+{ "projectId": "...", "categories": ["NEWS_CATEGORY_REGULATORY"],
+  "importances": ["NEWS_IMPORTANCE_HIGH"], "q": "лицензия", "pageSize": 50 }
+
+// UpdateNews — маска обязательна, иначе «показать скрытую» невыразимо
+{ "id": 42, "hidden": false, "updateMask": {"paths": ["hidden"]} }
+```
+
+### Где контракт реально проверяется
+
+| Сторона | Механизм | Что происходит при расхождении |
+|---|---|---|
+| Backend | `json_format.Parse(body, RequestPb(), ignore_unknown_fields=False)` | `400 invalid_argument` с перечислением допустимых полей |
+| Backend | `services/mappers.py` — единственное место ORM ↔ protobuf | смена proto ломает сборку сообщения в одном месте |
+| Backend | `connect.py` сверяет тип ответа хендлера с объявленным в proto | `500 internal` |
+| Frontend | `createPromiseClient(ProjectService, transport)` из `src/gen/` | ошибка `tsc` (`TS2353: ... does not exist in type PartialMessage<...>`) |
+| Оба | `make lint` (buf) + `buf breaking` + `make generate` перед коммитом | несогласованный proto не пройдёт review |
+
+Терсность proto3-JSON: поля со значением по умолчанию в ответе опускаются, поэтому `stats` со
+всеми нулями приходит как `{}` — сгенерированный клиент подставляет нули сам.
+
+---
+
+## 8. Frontend
+
+| Путь | Экран | Содержимое | Статус |
+|---|---|---|---|
+| `/` | **Projects** | список проектов + форма создания: `name`, `topic`, текстовые фильтры, редактор источников (тип, канал/URL, ярлык, активность) | ✅ + 🔜 редактор источников |
+| `/projects/:id` | **Project** | данные проекта; редактирование источников; «Запустить обновление» → `StartRun` → polling `GetRun`; плашка `stats`; лента карточек с категорией, важностью, сущностями; правка и скрытие карточки | ✅ + 🔜 обогащение и правка |
+| `/projects/:id/news` | **Лента (дашборд)** | вся лента проекта с фильтрами (категория, важность, источник, даты) и поиском; ручное добавление материала | 🔜 |
+| `/projects/:id/runs` | **Runs** | история запусков со `state` и `stats` | ✅ |
+
+Стек: React + Vite + TS, TanStack Query (polling и инвалидация кэша), Mantine.
+Клиент — сгенерированный: `src/api/client.ts` создаёт `createConnectTransport({ baseUrl: "/api" })`
+и `createPromiseClient(...)`. Типы `Project`, `Run`, `News`, `NewsCategory`, `SourceType` берутся
+из `src/gen/`, руками не пишутся.
+
+Если Run висит в `RUN_STATE_STARTED` дольше 90 с, показывается баннер «обработка идёт необычно
+долго» с кнопкой перезапуска — чтобы упавший воркер не выглядел как бесконечный спиннер. ✅
+
+---
+
+## 9. Конфигурация и docker-compose
+
+`backend/app/config.py`, значения по умолчанию — в `.env.example`. Секреты — в `.env` (не в git).
 
 | Переменная | Default | Назначение |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///data/app.db` | путь к БД |
-| `LLM_PROVIDER` | `mock` | `openai_compat` \| `ollama` \| `mock` |
-| `LLM_BASE_URL` | — | эндпоинт OpenAI-совместимого API |
-| `LLM_API_KEY` | — | ключ (если нужен) |
-| `LLM_MODEL` | `gpt-4o-mini` (пример) | имя модели |
-| `OLLAMA_URL` | `http://localhost:11434` | для `ollama` |
-| `EMBED_PROVIDER` | `local` | `local` \| `provider` \| `tfidf` |
-| `EMBED_MODEL` | `intfloat/multilingual-e5-small` | модель sentence-transformers |
-| `CLUSTER_SIM_HIGH` | `0.82` | порог безусловного объединения |
-| `CLUSTER_SIM_LOW` | `0.62` | порог объединения при совпадении сущности |
-| `CLUSTER_WINDOW_DAYS` | `3` | окно поиска кластера |
-| `PIN_FLOOR` | `0.6` | пол балла для `pin` |
-| `STRICT_THRESHOLD` | `0.25` | порог скрытия в строгом режиме |
-| `CORS_ORIGINS` | `http://localhost:5173` | адрес фронта |
+| `DATABASE_URL` | `postgresql+asyncpg://app:app@postgres:5432/app` | Postgres. Alembic сам подменяет драйвер на синхронный |
+| `REDIS_URL` | `redis://redis:6379/0` | Redis (только локи и heartbeat) |
+| `CORS_ORIGINS` | `http://localhost` | адрес фронта |
+| `DEBUG` | `false` | уровень логов, echo SQL |
+| `LLM_PROVIDER` | `mock` | `openai_compat` \| `mock` |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | — | для `openai_compat` (RouterAI) |
+| `TG_FETCH_LIMIT` / `TG_FETCH_DAYS` | `100` / `7` | лимит и глубина чтения Telegram-канала |
+| `RSS_FETCH_LIMIT` / `RSS_FETCH_DAYS` 🔜 | `50` / `7` | то же для RSS-лент |
+| `FILTER_BATCH` | `30` | размер батча message-filter |
+| `NEWSMAKER_CAP` / `NEWSMAKER_BATCH` | `100` / `12` | вход news-maker: обрезка и размер батча |
 
----
-
-## 12. Метрики и наблюдаемость
-
-- **`RunReport`** сохраняется после каждого прогона (таблица `run_log`), последний — в `Stats`.
-- **Демо-метрика** (`MetricBar`): «собрано N публикаций → M событий за T c; релевантно R;
-  скрыто как шум H; требует внимания A». `relevant` = события в основной ленте с `score > 0`;
-  `noise_hidden` = скрытые правилами/строгим режимом.
-- Логирование: структурные логи этапов пайплайна (`stage`, `count`, `ms`), уровень INFO.
-- Health: `GET /api/health` → `{status, db, llm_provider, embed_provider}`.
-
----
-
-## 13. Развёртывание
-
-```yaml
-# docker-compose.yml
-services:
-  api:
-    build: ./backend
-    environment:
-      - LLM_PROVIDER=${LLM_PROVIDER:-mock}
-      - EMBED_PROVIDER=${EMBED_PROVIDER:-local}
-      - CORS_ORIGINS=http://localhost:5173
-    volumes:
-      - ./data:/app/data          # SQLite + датасет + модель эмбеддингов (кэш HF)
-    ports: ["8000:8000"]
-  web:
-    build: ./frontend
-    environment:
-      - VITE_API_BASE=http://localhost:8000/api
-    ports: ["5173:5173"]
+```
+postgres:  postgres:16-alpine, том pgdata, healthcheck pg_isready
+redis:     redis:7-alpine, healthcheck redis-cli ping
+backend:   build ./backend, uvicorn app.main:app --reload, :8000, код примонтирован
+worker:    build ./backend (тот же образ), python -m app.worker.loop
+frontend:  build ./frontend (multi-stage: node build -> nginx со статикой), :80
 ```
 
-Локально без Docker: `uvicorn app.main:app --reload` + `npm run dev`. Модель эмбеддингов
-скачивается один раз в volume; для полностью оффлайн-демо — заранее прогреть кэш или
-`EMBED_PROVIDER=tfidf`.
-
-Первичное наполнение: `python -m app.scripts.import_dataset --project <id>` — загружает
-`data/dataset/*` как источник `archive`.
+`backend` и `worker` делят один образ и общий блок переменных (YAML-anchor `x-backend-env`).
+`PYTHONPATH=/app:/app/gen`, чтобы работал `from monitoring.v1 import monitoring_pb2`.
+Воркеров можно масштабировать: `docker compose up -d --scale worker=2` — задачи разбираются
+поллингом `tasks`, повторный захват отсекается Redis `claim`-ключом.
 
 ---
 
-## 14. Риски и меры
+## 10. Контракт и кодогенерация
 
-| Риск | Вероятность | Мера |
+Источник правды — [`proto/monitoring/v1/monitoring.proto`](../proto/monitoring/v1/monitoring.proto).
+
+```bash
+make lint       # buf lint
+make generate   # backend/gen/*.py  +  frontend/src/gen/*.ts
+make proto-all  # то и другое
+buf breaking --against '.git#branch=main'   # доказать, что изменения аддитивные
+```
+
+Сгенерированное **коммитится** (`backend/gen/`, `frontend/src/gen/`): `docker compose build`
+копирует `gen/` из контекста сборки, иначе образ не соберётся без предварительной генерации.
+Правило: изменил `.proto` → `buf lint` → `buf breaking` → `make generate` → коммить вместе.
+
+**Порядок работы над любой фичей**: сначала контракт, потом реализация. Нельзя «пока сделаем в
+JSON, а в proto потом занесём» — тогда расхождение сторон перестаёт ловиться на компиляции и
+всплывает на демо.
+
+### Что было дописано в контракт под функциональность
+
+Журнал изменений контракта, по заходам.
+
+**Заход 1 — состояние Run и метрика обработки** ✅
+
+```proto
+enum RunState {
+  ...
+  RUN_STATE_FAILED = 3;      // прогон упал (LLM недоступен и т.п.)
+}
+
+message RunStats {           // «обработано / релевантно / новостей» для плашки метрики
+  int32 collected = 1;
+  int32 relevant = 2;
+  int32 news = 3;
+  string error = 4;          // заполняется только при RUN_STATE_FAILED
+}
+
+message Run {
+  ...
+  RunStats stats = 6;
+}
+```
+
+**Заход 2, фаза A — источники разных типов** 🔜
+
+```proto
+enum SourceType {
+  SOURCE_TYPE_UNSPECIFIED = 0;
+  SOURCE_TYPE_TELEGRAM = 1;
+  SOURCE_TYPE_RSS = 2;       // NEW
+}
+
+message Source {
+  SourceType type = 1;
+  string telegram = 2;
+  string rss_url = 3;        // NEW — когда type == SOURCE_TYPE_RSS
+  string label = 4;          // NEW — «ЦБ РФ (регулятор)»: категория источника для UI и демо
+  bool disabled = 5;         // NEW — источник на паузе, но не удалён
+}
+```
+
+**Заход 2, фаза B — обогащение карточки** 🔜
+
+```proto
+enum NewsCategory {          // NEW — категоризация из чек-листа
+  NEWS_CATEGORY_UNSPECIFIED = 0;
+  NEWS_CATEGORY_REGULATORY = 1;   // регуляторика
+  NEWS_CATEGORY_REPUTATION = 2;   // репутация
+  NEWS_CATEGORY_COMPETITORS = 3;  // конкуренты
+  NEWS_CATEGORY_TRENDS = 4;       // тренды
+}
+enum NewsImportance {        // NEW — приоритизация
+  NEWS_IMPORTANCE_UNSPECIFIED = 0;
+  NEWS_IMPORTANCE_HIGH = 1;
+  NEWS_IMPORTANCE_MEDIUM = 2;
+  NEWS_IMPORTANCE_LOW = 3;
+}
+enum DocType {               // NEW — НПА или новостная статья
+  DOC_TYPE_UNSPECIFIED = 0;
+  DOC_TYPE_NEWS = 1;
+  DOC_TYPE_NPA = 2;
+}
+message NewsEntities {       // NEW — кто / что / когда / последствия
+  string who = 1;
+  string what = 2;
+  string when = 3;
+  string consequences = 4;
+}
+
+message News {
+  string title = 1;
+  string content = 2;
+  repeated string sources = 3;
+  int32 id = 4;                                // NEW — без id карточку нельзя адресовать
+  string project_id = 5;                        // NEW — лента строится по проекту
+  string run_id = 6;                            // NEW — пусто у карточек, добавленных руками
+  NewsCategory category = 7;                    // NEW
+  NewsImportance importance = 8;                // NEW
+  DocType doc_type = 9;                          // NEW
+  NewsEntities entities = 10;                    // NEW
+  repeated string tags = 11;                     // NEW
+  bool hidden = 12;                              // NEW
+  google.protobuf.Timestamp created_at = 13;     // NEW
+}
+```
+
+**Заход 2, фазы C–D — управление данными и лента** 🔜
+
+```proto
+service NewsService {                          // NEW
+  rpc ListNews(ListNewsRequest) returns (ListNewsResponse);      // лента с фильтрами и поиском
+  rpc UpdateNews(UpdateNewsRequest) returns (UpdateNewsResponse); // правка и скрытие
+  rpc CreateNews(CreateNewsRequest) returns (CreateNewsResponse); // ручное добавление
+}
+
+message ListNewsRequest {
+  string project_id = 1;
+  repeated NewsCategory categories = 2;      // OR-фильтр; пусто = все
+  repeated NewsImportance importances = 3;   // OR-фильтр; пусто = все
+  string source = 4;                          // точное совпадение с элементом News.sources
+  google.protobuf.Timestamp from = 5;
+  google.protobuf.Timestamp to = 6;
+  string q = 7;                                // текстовый поиск по title + content
+  bool include_hidden = 8;
+  int32 page_size = 9;
+  string page_token = 10;
+}
+
+message UpdateNewsRequest {
+  int32 id = 1;
+  string title = 2;
+  string content = 3;
+  NewsCategory category = 4;
+  NewsImportance importance = 5;
+  repeated string tags = 6;
+  bool hidden = 7;
+  google.protobuf.FieldMask update_mask = 8;   // обязателен, см. «подводные камни» ниже
+}
+```
+
+Управления источниками отдельными RPC **нет намеренно**: добавление, правка, удаление и пауза
+источника — это `UpdateProject` с `update_mask: ["sources"]` и новым массивом. На масштабе
+«несколько источников в проекте» это проще, чем `Source.id` + три отдельных RPC.
+
+### Подводные камни proto3 (найденные в этом проекте)
+
+| Место | Проблема | Решение |
 |---|---|---|
-| Telegram-парсинг ломается / блокируется | средняя | `t.me/s/` без авторизации; фолбэк — RSS-мост; демо не зависит от TG (есть archive) |
-| Сайты регуляторов — хрупкий HTML | высокая | начать с ЦБ РФ (есть RSS); селекторы в конфиге; 2 регулятора достаточно для MVP |
-| Нет ключа к LLM к дедлайну | средняя | `mock`-провайдер даёт полный рабочий цикл; демо на нём валидно |
-| Кластеризация склеивает разные события | средняя | двухпорог + проверка сущностей; пороги калибруются на датасете; ручное «разделить» — стретч |
-| Модель эмбеддингов не скачалась на площадке | средняя | `EMBED_PROVIDER=tfidf` как запасной вариант, тот же интерфейс |
-| LLM возвращает невалидный JSON | средняя | строгая JSON-схема + ретрай с «почини JSON» + Pydantic-валидация + дефолты |
-| Не успеваем весь MVP | средняя | порядок реализации даёт рабочий срез уже после шага 4 (§15) |
+| `FilterType.PROMT_BASED = 0` | содержательный ноль: в proto3-JSON нулевое значение опускается, поэтому «не задан» неотличим от «prompt-based» | пока тип фильтра один — безвредно; при появлении второго добавить `FILTER_TYPE_UNSPECIFIED = 0` и сдвинуть остальные (ломающее, поймает `buf breaking`) |
+| `Source.disabled`, а не `enabled` | у скаляров proto3 нет presence: пропущенное `enabled` парсится как `false` и молча выключило бы все существующие источники | флаг инвертирован — дефолт `false` означает «источник активен» |
+| `UpdateNewsRequest.update_mask` | у `hidden`/`title`/`tags` пустое значение легитимно («показать обратно», «очистить теги»), без маски оно неотличимо от «поле не прислали» | обязательная `FieldMask`, как в `UpdateProjectRequest` |
+| Новые enum'ы | — | все начинаются с `*_UNSPECIFIED = 0`, в отличие от легаси `FilterType` |
 
 ---
 
-## 15. Раздача работы и порядок реализации
+## 11. Критерии приёмки
 
-### Роли (3–5 человек)
+Построчно против MVP-чек-листа организаторов (`REQUIREMENTS.md` §1).
 
-| Роль | Зона | Файлы |
+| Требование чек-листа | Как закрыто | Статус |
 |---|---|---|
-| **A. Ingestion** | коннекторы, пресет источников, импорт датасета | `ingestion/*`, `data/seeds`, `scripts/import_dataset.py` |
-| **B. Processing/LLM** | пайплайн, очистка, дедуп, эмбеддинги, кластеризация, LLM | `processing/*` |
-| **C. Ranking/API** | движок правил, protective, все роутеры, FTS, планировщик, stats | `ranking/*`, `routers/*`, `scheduler.py` |
-| **D. Frontend** | Onboarding, Dashboard, NewsDrawer, Sources | `web/src/pages`, `web/src/components` |
-| **E. Frontend#2 + Demo** | Rules, Digest, MetricBar, семантический фокус, деплой, сценарий | `web/*`, `docker-compose.yml` |
+| Сбор минимум из 5 источников разных типов | 2 RSS СМИ + 1 RSS регулятора + 2 Telegram-канала, §5 | 🔜 |
+| Три категории источников (СМИ / регуляторы / Telegram) | RSS-коннектор для СМИ и регуляторов, `t.me/s/` для Telegram; категория — `Source.label` | 🔜 |
+| Автоматическая саммаризация ≥10 материалов | news-maker, 3–5 предложений на карточку, батчами; на демо-проекте — десятки материалов | ✅ |
+| Дашборд с фильтрацией и поиском | `NewsService.ListNews` + экран `/projects/:id/news`, §7–8 | 🔜 |
+| Добавление, редактирование, удаление источников | редактор источников на фронте → `UpdateProject` с маской `sources`; пауза через `disabled` | 🔜 |
+| Редактирование метаданных и саммари публикаций | `NewsService.UpdateNews` + модалка правки | 🔜 |
+| Саммари 3–5 предложений + сущности (кто/что/когда/последствия) | схема news-maker по решению Р5, §6 | ✅ саммари / 🔜 сущности |
+| Категоризация (регуляторика / репутация / конкуренты / тренды) | `NewsCategory`, заполняется news-maker'ом | 🔜 |
+| Приоритизация (высокая / средняя / низкая) | `NewsImportance`, отображается бейджем, доступна как фильтр | 🔜 |
+| Добавление источника по URL | RSS-источник задаётся URL'ом в редакторе источников | 🔜 |
+| Редактирование заголовка, саммари, категории, приоритета, тегов | `UpdateNews` с `FieldMask` | 🔜 |
+| Удаление/скрытие источника или публикации | `News.hidden`, `Source.disabled` — скрытие без потери данных | 🔜 |
+| Ручное добавление материала | `NewsService.CreateNews` (`run_id` пустой) | 🔜 |
+| Метрика: обработано / релевантно / отсеяно | `RunStats` (`collected`/`relevant`/`news`) на плашке прогона | ✅ |
 
-**Контракты фиксируются в первый час:** `AnalyzeResult` (B) и `Rule` + `NewsListResponse` (C) —
-кладутся в `schemas.py` и `web/src/api/types.ts`.
+Инженерные проверки:
 
-### Порядок реализации
-
-1. **Скелет.** FastAPI + модели + SQLite/FTS init + Vite/React каркас + CORS. `GET /projects/{id}/news`
-   отдаёт сид-данные, дашборд рендерит ленту.
-2. **Оффлайн-цикл.** `archive`-коннектор + `dedup` + `mock`-LLM → события в БД (1 RawDoc = 1 NewsItem).
-3. **Кластеризация.** `embed` (local) + `cluster` → дубли из разных источников схлопываются;
-   `analyze` переходит на вход «весь кластер».
-4. **Правила `field`.** `rules` + `engine` + стартовый набор + `protective` + `RuleHits` на карточке.
-   → **После этого шага есть демонстрируемый срез MVP.**
-5. **Живые источники.** `rss` + `telegram_web` + 2 регулятора (итого ≥5 источников разных типов).
-6. **Управление данными.** CRUD источников и событий, ручное добавление, скрытие, feedback, `edited_fields`.
-7. **Онбординг + поиск.** Визард проекта, `FeedFilters`, FTS-поиск.
-8. **Страница Rules.** CRUD правил + мгновенный rerank + предпросмотр.
-9. **Семантика.** `semantic`-правило + поле «показать по смыслу» (`preview-rank`).
-10. **Реальный LLM.** Подключить `openai_compat`/`ollama` через ENV, сравнить с `mock`.
-11. **Дайджест, MetricBar, полировка, репетиция демо.**
-
-### Демо-сценарий (защита, ~5 минут)
-
-1. Онбординг: проект «Мониторинг GS Labs», отрасль, отслеживаемые компании, период 7 дней, пресет источников.
-2. «Обработать» → `MetricBar`: *собрано 63 → 34 события за ~29 c; релевантно 18; шум 12; внимание 4*.
-3. Событие из 3 источников (2 TG + сайт) → одна карточка, 3 ссылки в `SourceList`.
-4. Блок «Требует внимания»: критичный НПА, поднятый защитным правилом мимо пользовательских.
-5. Карточка: саммари 3–5 предложений в контексте отрасли, сущности, тип «НПА», важность, `RuleHits`.
-6. Правим саммари и важность → сохранилось; повторный «Обновить» не перетирает.
-7. Добавляем RSS-источник вживую → «Обновить сейчас» → инкрементально приходят только новые события.
-8. Добавляем правило «Исключить тему ИИ» (−4) → лента мгновенно пересортировалась, без LLM.
-9. «Показать по смыслу»: *«риски новых пошлин для наших поставок»* → лента сжалась до 6 карточек; сброс.
-10. Дайджест за неделю → экспорт в Markdown.
+- [x] `buf lint` чистый, `make generate` воспроизводит `backend/gen` и `frontend/src/gen`
+- [x] неизвестное поле в запросе → `400 invalid_argument`; поле вне контракта на фронте → ошибка `tsc`
+- [x] `docker compose up` + `alembic upgrade head` поднимают систему с нуля
+- [x] `make test` — юнит-тесты без сети и БД (мапперы, mock-LLM, парсеры, контракт)
+- [x] `make smoke` — сквозной прогон `CreateProject → StartRun → GetRun == DONE`
+- [x] `/api/health` показывает БД, Redis и живость воркера
+- [x] `--scale worker=2` не даёт дублей (claim + уникальный индекс на compose-задачу)
+- [ ] 🔜 прогон с источниками обоих типов в одном Run
+- [ ] 🔜 карточка с категорией, важностью и сущностями; правка карточки переживает новый Run
+- [ ] 🔜 фильтры и поиск по ленте возвращают корректное подмножество
 
 ---
 
-## 16. Критерии приёмки
+## 12. Как запускать
 
-Полный список — в [`REQUIREMENTS.md` §4–5](./REQUIREMENTS.md#4-функциональные-требования-сводно).
-Технические проверки:
+```bash
+make up          # поднять весь стек (первая сборка фронта ~5-8 мин)
+make migrate     # применить миграции
+make test        # юнит-тесты бэкенда (без Postgres/Redis/сети)
+make smoke       # сквозная проверка стека
+make logs        # логи воркера (make logs s=backend)
+make proto-all   # buf lint + перегенерация после правки proto
+```
 
-- [ ] `GET /api/health` = 200; `LLM_PROVIDER`, `EMBED_PROVIDER` видны в ответе.
-- [ ] `import_dataset` → ≥50 `RawDoc` в БД.
-- [ ] `POST /collect` с `LLM_PROVIDER=mock` отрабатывает без сети; у всех `NewsItem` заполнены
-      `summary/doc_type/category/importance/score`; `news_items < raw_docs` (кластеризация сработала).
-- [ ] 2–3 почти одинаковых текста из разных источников → один `NewsItem` с несколькими `sources`.
-- [ ] `GET /news?q=…&importance=high&doc_type=npa` — поиск + фильтры, сортировка по `score`,
-      у каждого события заполнен `rule_hits`.
-- [ ] `POST /rules` (`penalize -4`, regex по summary) → `GET /news` мгновенно меняет порядок,
-      LLM не вызывается; `DELETE` правила возвращает порядок.
-- [ ] `POST /news/preview-rank` с временным `semantic` `hide` → лента сокращается; обычный
-      `GET /news` — полная лента.
-- [ ] `PATCH /news/{id}` меняет саммари; повторный `collect` не перетирает (`edited_fields`).
-- [ ] `POST /sources` с реальным RSS + `collect` → приходят только материалы новее `last_fetched_at`.
-- [ ] Frontend: дашборд открывается, фильтры/поиск/редактирование работают, блок «Требует внимания»
-      и «N источников» отображаются.
-- [ ] Полный демо-сценарий укладывается в ~5 минут.
+UI — http://localhost, health — `curl localhost/api/health`.
+
+Реальный LLM вместо `mock` — положить в `.env`:
+
+```bash
+LLM_PROVIDER=openai_compat
+LLM_BASE_URL=https://routerai.ru/api/v1
+LLM_API_KEY=<ключ RouterAI>
+LLM_MODEL=deepseek/deepseek-v4-flash-0731
+docker compose up -d worker    # воркер не перечитывает env на лету
+```
+
+**Известные грабли**
+
+- воркер не перечитывает `.env` на лету — после правки `docker compose up -d worker`;
+- нет `.env` → тихий откат на `LLM_PROVIDER=mock`; проверять `llm_provider` в `/api/health`;
+- часть Telegram-каналов отключает веб-превью (напр. `rian_ru`) — оттуда `extract` вернёт 0
+  сообщений с предупреждением в логе;
+- после `docker compose restart backend` nginx может отдавать 502, если резолвер закешировал
+  старый IP — в `frontend/nginx.conf` для этого стоит `resolver 127.0.0.11` + переменная в
+  `proxy_pass`.
+
+---
+
+## 13. Путь наращивания
+
+Осознанно не делаем сейчас — не потому что не нужно, а потому что не входит в чек-лист
+организаторов и не помещается в срок. Порядок — по убыванию отдачи:
+
+1. **Движок правил ранжирования** (решения Р6–Р9): позиция карточки = сумма весов сработавших
+   правил, правила двух видов — `field` (условия по полям карточки) и `semantic` (близость
+   эмбеддинга к эталонному тексту), действия `boost/penalize/pin/hide`, объяснение позиции
+   списком сработавших правил, плюс неотключаемые защитные правила «Требует внимания»
+   (критичные изменения НПА, комплаенс-риски, репутационные кризисы).
+2. **Эмбеддинги + кластеризация событий** вместо LLM-группировки: окно N дней, пороги косинуса
+   (`sim ≥ 0.82` — сливать, `0.62…0.82` — сливать при совпадении сущностей), кэш эмбеддинга на
+   сообщении. Даст воспроизводимость и независимость от того, как модель сегодня «настроена».
+3. **Расписание** в воркере (периодический авто-Run проекта: раз в час / несколько раз в день /
+   раз в день), сейчас — только ручной запуск.
+4. **Дайджест за период** с экспортом в Markdown.
+5. **Полнотекстовый поиск** (Postgres `tsvector` + ранжирование `ts_rank`) вместо `ILIKE`, когда
+   объём ленты вырастет настолько, что это станет заметно.
+6. **Оффлайн-архив как тип источника** (`SOURCE_TYPE_ARCHIVE`) — набор из 50+ статей и НПА для
+   отладки саммаризации без внешних API.
+7. **Скрейпинг HTML-сайтов регуляторов** для тех, кто не отдаёт RSS.

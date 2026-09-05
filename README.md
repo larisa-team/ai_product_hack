@@ -25,6 +25,14 @@ curl localhost/api/health
 
 Все команды — `make help`.
 
+### Перед защитой
+
+```bash
+make test     # 24 юнит-теста на чистой логике (мапперы, mock LLM, парсер t.me/s/, ретрай, cascade) — 0.5с
+make smoke    # сквозная проверка: CreateProject -> StartRun -> polling -> итог
+curl localhost/api/health   # {"worker": true} — если false, воркер не отвечает по heartbeat
+```
+
 ### LLM
 
 По умолчанию `LLM_PROVIDER=mock` — конвейер работает **без сети и без ключей**, но фильтрация
@@ -68,12 +76,12 @@ POST /api/monitoring.v1.RunService/StartRun
 
 ```
 StartRun
-  └─ backend: Run(RUN_STATE_STARTED) + по задаче на канал в Redis (q:extract)
+  └─ backend: Run(RUN_STATE_STARTED) + по задаче на канал в Postgres (tasks, kind=extract)
 
-worker (BRPOP)
+worker (поллинг tasks раз в 2 c)
   ├─ extract:  t.me/s/<channel> → новые посты
   │            (курсор source_cursors.last_msg_id + дедуп по content_hash)
-  └─ compose:  когда все extract готовы
+  └─ compose:  когда все extract прогона в статусе done
        ├─ message-filter: LLM батчами по 30 → relevant true/false
        ├─ news-maker:     LLM батчами по 12 → группировка дублей + саммари
        └─ Run(RUN_STATE_DONE) + строки news + stats
@@ -81,8 +89,11 @@ worker (BRPOP)
 фронт: polling GetRun каждые 2 c, пока state == RUN_STATE_STARTED
 ```
 
-Redis держит очереди, claim-ключи «взято в работу» и счётчик прогресса, поэтому воркеров
-можно масштабировать: `docker compose up -d --scale worker=2`.
+Очередь — таблица `tasks` в Postgres, а не Redis: воркер её поллит, а не блокируется на
+чтении. Redis остался только под `claim()` — `SET NX EX`, решает, кто из воркеров реально
+исполняет задачу, если несколько одновременно выбрали одну и ту же pending-строку (обычный
+`SELECT`, без блокировки), — и под heartbeat для `/api/health`. Воркеров можно
+масштабировать: `docker compose up -d --scale worker=2`.
 
 ## Источники
 
@@ -110,7 +121,7 @@ backend/
     database/             models, session, repositories
     ingestion/            telegram_web
     llm/                  provider, openai_compat (RouterAI), mock
-    worker/               loop (BRPOP), jobs (extract, compose)
+    worker/               loop (поллинг tasks), jobs (extract, compose)
   migrations/             Alembic
 frontend/
   src/gen/                сгенерированные TS-типы и Connect-клиенты (make generate)
@@ -135,7 +146,9 @@ make proto-all            # buf lint + перегенерация после п�
 ## Документация
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — как развернуть и как работать с proto.
-- [docs/SYSTEM_DESIGN_LIGHT.md](docs/SYSTEM_DESIGN_LIGHT.md) — **дизайн текущей версии** и путь наращивания.
+- [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) — **актуальный инженерный дизайн**: модель данных,
+  конвейер, контракт и кодогенерация, критерии приёмки против чек-листа.
 - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — вводные и журнал решений команды.
-- [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) — полный целевой инженерный проект.
+- [docs/SYSTEM_DESIGN_LIGHT.md](docs/SYSTEM_DESIGN_LIGHT.md) — исторический срез: первая
+  Telegram-only версия, с которой начинали.
 - [PROJECT_SCENARIOS_AND_FILTERS.md](PROJECT_SCENARIOS_AND_FILTERS.md) — сценарии продукта и логика фильтрации.

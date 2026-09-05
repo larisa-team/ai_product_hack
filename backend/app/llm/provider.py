@@ -10,10 +10,24 @@ from typing import Protocol, TypedDict
 from app.config import settings
 
 
+class NewsEntitiesDict(TypedDict):
+    who: str
+    what: str
+    when: str
+    consequences: str
+
+
 class NewsGroup(TypedDict):
     title: str
     content: str
     message_indices: list[int]
+    # Ниже — «что это» по решению Р5. Провайдеры отдают значения на языке предметной
+    # области («регуляторика», «high», «npa»); в имена enum'ов их переводит
+    # app/llm/schema.py, а не каждый провайдер по-своему.
+    category: str
+    importance: str
+    doc_type: str
+    entities: NewsEntitiesDict
 
 
 class LLMProvider(Protocol):

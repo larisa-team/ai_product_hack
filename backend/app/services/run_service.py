@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.models import News, Run
 from app.database.repositories.project_repo import ProjectRepository
 from app.database.repositories.run_repo import RunRepository
-from app.queue import Q_EXTRACT, enqueue, set_pending
+from app.database.repositories.task_repo import TaskRepository
+from app.services import mappers
 
 STARTED = "RUN_STATE_STARTED"
 DONE = "RUN_STATE_DONE"
@@ -21,6 +22,7 @@ class RunService:
         self.db = db
         self.runs = RunRepository(db)
         self.projects = ProjectRepository(db)
+        self.tasks = TaskRepository(db)
 
     async def start_run(self, project_id: str) -> tuple[Run | None, str | None]:
         """(Run, None) при успехе, (None, причина) — если запускать нечего."""
@@ -28,10 +30,9 @@ class RunService:
         if project is None:
             return None, "not_found"
 
-        channels = [s.get("telegram", "").strip() for s in (project.sources or [])]
-        channels = [c for c in channels if c]
-        if not channels:
-            return None, "у проекта нет источников"
+        sources = self._collect_sources(project.sources or [])
+        if not sources:
+            return None, "у проекта нет активных источников"
 
         run = await self.runs.create(
             Run(
@@ -43,13 +44,27 @@ class RunService:
             )
         )
 
-        await set_pending(run.id, len(channels))
-        for channel in channels:
-            await enqueue(
-                Q_EXTRACT,
-                {"run_id": run.id, "project_id": project.id, "channel": channel},
-            )
+        self.tasks.create_extract_tasks(run.id, project.id, sources)
         return run, None
+
+    @staticmethod
+    def _collect_sources(raw_sources: list[dict]) -> list[dict[str, str]]:
+        """JSONB-источники проекта -> задания на сбор.
+
+        JSONB хранит Source в форме proto3-JSON, поэтому конвертация идёт через маппер:
+        ключ источника и его тип знает контракт, а не этот сервис.
+        Источники на паузе (`disabled`) пропускаем.
+        """
+        out: list[dict[str, str]] = []
+        for raw in raw_sources:
+            source = mappers.source_to_pb(raw)
+            if source.disabled:
+                continue
+            key = mappers.source_key(source)
+            if not key:
+                continue
+            out.append({"source_type": mappers.source_type_name(source), "source_key": key})
+        return out
 
     async def get_run(self, run_id: str) -> tuple[Run, list[News]] | None:
         run = await self.runs.get_with_news(run_id)

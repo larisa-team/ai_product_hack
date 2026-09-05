@@ -1,11 +1,15 @@
 # System Design Light
 
-> Упрощённая первая версия. Полный дизайн: [`SYSTEM_DESIGN.md`](./SYSTEM_DESIGN.md),
-> вводные: [`REQUIREMENTS.md`](./REQUIREMENTS.md). Контракт данных: [`../proto/monitoring/v1/monitoring.proto`](../proto/monitoring/v1/monitoring.proto).
-> Запуск — §12, план реализации и статус — §13.
+> ⚠️ **Исторический документ — описывает первую (Telegram-only) версию.**
+> Актуальный инженерный дизайн: [`SYSTEM_DESIGN.md`](./SYSTEM_DESIGN.md) — ссылаться при
+> разработке нужно на него. Этот файл оставлен, чтобы был виден стартовый срез: с чего начинали
+> и что изменилось.
+> Вводные: [`REQUIREMENTS.md`](./REQUIREMENTS.md). Контракт данных: [`../proto/monitoring/v1/monitoring.proto`](../proto/monitoring/v1/monitoring.proto).
 
-Команда стартует с этой версии и наращивает её до полного дизайна. Задача light-версии — как можно
-быстрее получить сквозной путь: **создать проект → запустить Run → получить список новостей**.
+Задача light-версии была — как можно быстрее получить сквозной путь: **создать проект → запустить
+Run → получить список новостей**. Он получен и работает; дальше система наращивается по чек-листу
+организаторов (источники разных типов, обогащение карточки, редактирование, дашборд) — см.
+`SYSTEM_DESIGN.md`.
 
 ---
 
@@ -44,10 +48,9 @@ flowchart LR
     U[Браузер] --> NGINX[nginx]
     NGINX -->|/| REACT[React static]
     NGINX -->|/api| BE[backend<br/>FastAPI]
-    BE --> PG[(Postgres)]
-    BE -->|enqueue extract| RD[(Redis<br/>очереди + claim + счётчики)]
-    W[worker<br/>BRPOP-цикл] --> RD
-    W --> PG
+    BE -->|INSERT tasks| PG[(Postgres<br/>+ таблица tasks)]
+    W[worker<br/>поллинг tasks] --> PG
+    W -->|claim + heartbeat| RD[(Redis<br/>только SET NX EX)]
     W -->|t.me/s/&lt;channel&gt;| TG[Telegram web preview]
     W -->|filter + news-maker| LLM{{LLM provider<br/>openai_compat / mock}}
 ```
@@ -73,6 +76,7 @@ erDiagram
     PROJECTS ||--o{ SOURCE_CURSORS : ""
     RUNS     ||--o{ MESSAGES : ""
     RUNS     ||--o{ NEWS : ""
+    RUNS     ||--o{ TASKS : ""
 ```
 
 Схема ведётся Alembic (`backend/migrations`), модели — `backend/app/database/models.py`.
@@ -126,6 +130,23 @@ CREATE TABLE source_cursors (
   last_msg_id BIGINT,                    -- курсор инкрементального чтения
   PRIMARY KEY (project_id, channel)
 );
+
+-- Очередь воркера. SELECT ... WHERE status='pending' не блокирует строку — несколько
+-- воркеров могут выбрать одну и ту же задачу в одном тике поллинга; кто её реально
+-- исполняет, решает Redis claim() (единственное, для чего Redis остался в системе).
+CREATE TABLE tasks (
+  id VARCHAR PRIMARY KEY,
+  run_id VARCHAR NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  kind VARCHAR(20) NOT NULL,             -- extract | compose
+  payload JSONB NOT NULL DEFAULT '{}',   -- {"project_id","channel"} для extract, {} для compose
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending | done
+  created_at TIMESTAMP NOT NULL
+);
+CREATE INDEX ix_tasks_run_id ON tasks(run_id);
+CREATE INDEX ix_tasks_created_at ON tasks(created_at);
+-- не больше одной compose-задачи на run, даже если несколько extract-задач
+-- прогона завершились почти одновременно в разных транзакциях
+CREATE UNIQUE INDEX uq_tasks_compose_per_run ON tasks(run_id) WHERE kind = 'compose';
 ```
 
 **Почему `filters`/`sources` — JSONB, а курсор — отдельная таблица.** JSONB хранит вложенные
@@ -149,22 +170,22 @@ sequenceDiagram
 
     FE->>BE: POST /api/monitoring.v1.RunService/StartRun
     BE->>BE: INSERT runs(state=RUN_STATE_STARTED)
-    BE->>RD: SET run:{run}:pending = N каналов
     loop по каждому каналу из project.sources
-        BE->>RD: RPUSH q:extract {run, project, channel}
+        BE->>BE: INSERT tasks(kind=extract, payload={project,channel}, status=pending)
     end
     BE-->>FE: StartRunResponse{run}
 
-    loop worker BLPOP q:extract / q:compose
+    loop worker: раз в 2с SELECT tasks WHERE status='pending' LIMIT 20
         W->>RD: SET claim:{job_id} NX EX 600
         alt claim получен
+            W->>W: UPDATE tasks SET status='done' WHERE id=... (сразу, отдельным коммитом)
             W->>TG: GET t.me/s/<channel>?before=... (до last_msg_id / лимита / глубины)
             TG-->>W: посты
             W->>W: INSERT messages ON CONFLICT DO NOTHING (project_id, content_hash)
             W->>W: UPSERT source_cursors.last_msg_id
-            W->>RD: DECR run:{run}:pending
+            W->>W: SELECT COUNT(*) tasks WHERE run_id=... AND kind='extract' AND status='pending'
             opt счётчик == 0
-                W->>RD: RPUSH q:compose {run}
+                W->>W: INSERT tasks(kind=compose) ON CONFLICT (run_id) WHERE kind='compose' DO NOTHING
             end
         end
     end
@@ -189,17 +210,25 @@ sequenceDiagram
 
 ### Redis-ключи
 
+Очередь задач — таблица `tasks` в Postgres (см. §3), не Redis. Redis хранит только два вида
+ключей — оба живут секунды-минуты и не переживают перезапуск осмысленно, поэтому Redis можно
+полностью потерять между Run'ами без потери данных.
+
 | Ключ | Тип | Назначение |
 |---|---|---|
-| `q:extract`, `q:compose` | list | очереди задач (`RPUSH` / `BLPOP`) |
-| `claim:{job_id}` | string, `SET NX EX 600` | «взято в работу» — параллельные worker'ы и повторные enqueue не дублируют обработку |
-| `run:{run_id}:pending` | integer, `DECR` | сколько extract-задач осталось; последний инициирует `compose` |
+| `claim:{job_id}` | string, `SET NX EX ttl` | «взято в работу» — несколько воркеров могут выбрать одну и ту же pending-строку из `tasks` (обычный `SELECT`, без блокировки); claim решает, кто её реально исполняет. `ttl` = `CLAIM_TTL_EXTRACT` (600с) или `CLAIM_TTL_COMPOSE` (1800с) |
+| `worker:heartbeat` | string, `SET EX 15` | обновляется на каждом тике поллинга; `/api/health` считает воркер живым, пока ключ не истёк |
 
 `job_id`: `"{run_id}:{channel}"` для extract, `"compose:{run_id}"` для compose.
 
 ### Отказоустойчивость (light-уровень)
 
 - worker умер посреди задачи → `claim:{job_id}` истекает через TTL, задачу можно перезапустить;
+  сама задача при этом всё ещё `pending` в Postgres (кроме доли секунды между claim и
+  `UPDATE status='done'`), поэтому переживает падение процесса воркера без дополнительной логики;
+- Redis целиком недоступен → `claim()`/heartbeat падают в исключение, `/api/health` покажет
+  `degraded`, но сама очередь (`tasks` в Postgres) не теряется — обработка продолжится, как
+  только Redis вернётся;
 - «завис» Run (в `RUN_STATE_STARTED` дольше N минут) → повторный `StartRun` создаёт новый Run;
 - ошибка LLM/парсинга в compose → `RUN_STATE_FAILED`, `stats.error`, новости не создаются.
 
@@ -359,7 +388,7 @@ frontend:  build ./frontend (multi-stage: node build -> nginx со статик�
 `PYTHONPATH=/app:/app/gen`, чтобы работал `from monitoring.v1 import monitoring_pb2`.
 
 Воркеров можно масштабировать: `docker compose up -d --scale worker=2` — задачи разбираются
-через `BLPOP`, повторный захват отсекается `claim`-ключом.
+поллингом таблицы `tasks`, повторный захват отсекается Redis `claim`-ключом.
 
 ---
 

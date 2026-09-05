@@ -51,17 +51,21 @@ async def health() -> dict:
         db_ok = False
 
     redis_ok = True
+    worker_ok = False
     try:
-        from app.queue import ping_redis
+        from app.queue import ping_redis, worker_alive
 
         redis_ok = await ping_redis()
+        if redis_ok:
+            worker_ok = await worker_alive()
     except Exception:
         redis_ok = False
 
     return {
-        "status": "ok" if (db_ok and redis_ok) else "degraded",
+        "status": "ok" if (db_ok and redis_ok and worker_ok) else "degraded",
         "db": db_ok,
         "redis": redis_ok,
+        "worker": worker_ok,
         "llm_provider": settings.LLM_PROVIDER,
         "rpc": registry.describe(),
     }

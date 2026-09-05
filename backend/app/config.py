@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # --- Параметры обработки ---
     TG_FETCH_LIMIT: int = 100           # максимум постов на канал за прогон
     TG_FETCH_DAYS: int = 7              # глубина чтения канала
+    RSS_FETCH_LIMIT: int = 50           # максимум записей на ленту за прогон
+    RSS_FETCH_DAYS: int = 7             # глубина чтения ленты
     FILTER_BATCH: int = 30              # размер батча message-filter
     NEWSMAKER_CAP: int = 100            # максимум relevant-сообщений в news-maker
     NEWSMAKER_BATCH: int = 12           # сообщений на один вызов news-maker

@@ -3,21 +3,29 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.config import settings
-from app.database.models import News, Project, Run
+from app.database.models import News, Project, Run, Task
 from app.database.repositories.message_repo import MessageRepository
+from app.database.repositories.task_repo import TaskRepository
 from app.database.session import async_session
+from app.ingestion.rss import RssFetchError
+from app.ingestion.rss import fetch as rss_fetch
 from app.ingestion.telegram_web import NoPreviewError
 from app.ingestion.telegram_web import fetch as tg_fetch
+from app.llm import schema
 from app.llm.provider import get_provider
-from app.queue import Q_COMPOSE, claim, dec_pending, enqueue
+from app.queue import CLAIM_TTL_COMPOSE, CLAIM_TTL_EXTRACT, claim
 from app.services.run_service import DONE, FAILED
 
 log = logging.getLogger(__name__)
 
 _MIN_DT = datetime.min
+
+# Имена значений monitoring.v1.SourceType — в таком виде тип едет в payload задачи.
+TELEGRAM = "SOURCE_TYPE_TELEGRAM"
+RSS = "SOURCE_TYPE_RSS"
 
 
 def _chunks(seq: list, size: int) -> Iterator[list]:
@@ -25,67 +33,155 @@ def _chunks(seq: list, size: int) -> Iterator[list]:
         yield seq[i : i + size]
 
 
-async def handle_extract(payload: dict) -> None:
-    run_id = payload["run_id"]
-    project_id = payload["project_id"]
-    channel = payload["channel"]
-    job_id = f"{run_id}:{channel}"
+def _entities_with_date(raw: dict | None, messages: list) -> dict[str, str]:
+    """Сущности группы; `when` при необходимости достраивается из дат сообщений.
 
-    if not await claim(job_id):
+    Дата публикации у нас и так есть — просить её у модели значит рисковать выдумкой
+    там, где есть факт. Но если модель вернула что-то содержательное («вступает в силу
+    с 1 марта»), это ценнее даты поста, поэтому её ответ приоритетнее.
+    """
+    entities = schema.entities_dict(raw)
+    if entities["when"]:
+        return entities
+    dates = [m.posted_at for m in messages if m.posted_at]
+    if dates:
+        entities["when"] = min(dates).strftime("%d.%m.%Y")
+    return entities
+
+
+async def handle_extract(task: Task) -> None:
+    run_id = task.run_id
+    project_id = task.payload["project_id"]
+    source_key = task.payload["source_key"]
+    source_type = task.payload.get("source_type", TELEGRAM)
+    job_id = f"{run_id}:{source_key}"
+
+    if not await claim(job_id, ttl=CLAIM_TTL_EXTRACT):
         log.info("extract %s: уже в работе, пропуск", job_id)
         return
 
+    # Отдельный коммит до самой работы: claim() уже гарантировал, что задачу исполняем
+    # именно мы, а откат следующей транзакции (например, при сбое сбора) не должен
+    # вернуть задачу обратно в pending и заставить её опрашивать заново.
+    async with async_session() as db:
+        await TaskRepository(db).mark_done(task.id)
+        await db.commit()
+
     async with async_session() as db:
         repo = MessageRepository(db)
-        cursor = await repo.get_cursor(project_id, channel)
 
-        try:
-            msgs = await tg_fetch(
-                channel,
-                since_msg_id=cursor,
-                limit=settings.TG_FETCH_LIMIT,
-                days=settings.TG_FETCH_DAYS,
-            )
-        except NoPreviewError as exc:
-            log.warning("extract %s: %s", job_id, exc)
-            msgs = []
-        except Exception:
-            log.exception("extract %s: ошибка сбора", job_id)
-            msgs = []
+        if source_type == RSS:
+            fetched, inserted = await _extract_rss(repo, project_id, run_id, source_key, job_id)
+        else:
+            fetched, inserted = await _extract_telegram(repo, project_id, run_id, source_key, job_id)
 
-        inserted = 0
-        max_id = cursor or 0
-        for m in msgs:
-            max_id = max(max_id, m.tg_msg_id)
-            posted = m.posted_at.replace(tzinfo=None) if m.posted_at else None
-            if await repo.add_if_new(
-                project_id=project_id,
-                run_id=run_id,
-                channel=m.channel,
-                tg_msg_id=m.tg_msg_id,
-                url=m.url,
-                text=m.text,
-                posted_at=posted,
-                content_hash=m.content_hash,
-            ):
-                inserted += 1
+        task_repo = TaskRepository(db)
+        remaining = await task_repo.count_pending(run_id, "extract")
+        if remaining <= 0:
+            await task_repo.enqueue_compose_if_ready(run_id)
 
-        if max_id:
-            await repo.set_cursor(project_id, channel, max_id)
         await db.commit()
-        log.info("extract %s: fetched=%d inserted=%d", job_id, len(msgs), inserted)
-
-    remaining = await dec_pending(run_id)
-    log.info("run %s: осталось extract-задач %d", run_id, remaining)
-    if remaining <= 0:
-        await enqueue(Q_COMPOSE, {"run_id": run_id})
+        log.info(
+            "extract %s [%s]: fetched=%d inserted=%d, осталось extract-задач %d",
+            job_id, source_type, fetched, inserted, remaining,
+        )
 
 
-async def handle_compose(payload: dict) -> None:
-    run_id = payload["run_id"]
-    if not await claim(f"compose:{run_id}"):
+async def _extract_telegram(
+    repo: MessageRepository, project_id: str, run_id: str, channel: str, job_id: str
+) -> tuple[int, int]:
+    """Telegram: курсор — сквозной номер сообщения."""
+    cursor = await repo.get_cursor(project_id, channel)
+    try:
+        msgs = await tg_fetch(
+            channel,
+            since_msg_id=cursor,
+            limit=settings.TG_FETCH_LIMIT,
+            days=settings.TG_FETCH_DAYS,
+        )
+    except NoPreviewError as exc:
+        # Часть каналов отключает веб-превью — это не авария всего прогона.
+        log.warning("extract %s: %s", job_id, exc)
+        return 0, 0
+    except Exception:
+        log.exception("extract %s: ошибка сбора", job_id)
+        return 0, 0
+
+    inserted = 0
+    max_id = cursor or 0
+    for m in msgs:
+        max_id = max(max_id, m.tg_msg_id)
+        posted = m.posted_at.replace(tzinfo=None) if m.posted_at else None
+        if await repo.add_if_new(
+            project_id=project_id,
+            run_id=run_id,
+            source_key=m.channel,
+            tg_msg_id=m.tg_msg_id,
+            url=m.url,
+            text=m.text,
+            posted_at=posted,
+            content_hash=m.content_hash,
+        ):
+            inserted += 1
+
+    if max_id:
+        await repo.set_cursor(project_id, channel, max_id)
+    return len(msgs), inserted
+
+
+async def _extract_rss(
+    repo: MessageRepository, project_id: str, run_id: str, feed_url: str, job_id: str
+) -> tuple[int, int]:
+    """RSS: курсор — дата публикации, сквозных номеров у записей нет."""
+    cursor = await repo.get_cursor_published_at(project_id, feed_url)
+    # Курсор лежит в БД без таймзоны, а записи ленты приходят в UTC — сравнивать
+    # naive и aware datetime нельзя, поэтому приводим курсор к UTC.
+    since = cursor.replace(tzinfo=timezone.utc) if cursor is not None else None
+    try:
+        entries = await rss_fetch(
+            feed_url,
+            since=since,
+            limit=settings.RSS_FETCH_LIMIT,
+            days=settings.RSS_FETCH_DAYS,
+        )
+    except RssFetchError as exc:
+        log.warning("extract %s: %s", job_id, exc)
+        return 0, 0
+    except Exception:
+        log.exception("extract %s: ошибка сбора", job_id)
+        return 0, 0
+
+    inserted = 0
+    newest: datetime | None = None
+    for e in entries:
+        posted = e.posted_at.replace(tzinfo=None) if e.posted_at else None
+        if posted is not None and (newest is None or posted > newest):
+            newest = posted
+        if await repo.add_if_new(
+            project_id=project_id,
+            run_id=run_id,
+            source_key=feed_url,
+            url=e.url,
+            text=e.text,
+            posted_at=posted,
+            content_hash=e.content_hash,
+        ):
+            inserted += 1
+
+    if newest is not None:
+        await repo.set_cursor_published_at(project_id, feed_url, newest)
+    return len(entries), inserted
+
+
+async def handle_compose(task: Task) -> None:
+    run_id = task.run_id
+    if not await claim(f"compose:{run_id}", ttl=CLAIM_TTL_COMPOSE):
         log.info("compose %s: уже в работе, пропуск", run_id)
         return
+
+    async with async_session() as db:
+        await TaskRepository(db).mark_done(task.id)
+        await db.commit()
 
     async with async_session() as db:
         run = await db.get(Run, run_id)
@@ -139,7 +235,7 @@ async def handle_compose(payload: dict) -> None:
             for offset in range(0, len(capped), settings.NEWSMAKER_BATCH):
                 batch = capped[offset : offset + settings.NEWSMAKER_BATCH]
                 payload_msgs = [
-                    {"i": i, "channel": m.channel, "text": m.text} for i, m in enumerate(batch)
+                    {"i": i, "source": m.source_key, "text": m.text} for i, m in enumerate(batch)
                 ]
                 for g in await provider.make_news(project.topic, payload_msgs):
                     # индексы внутри батча -> позиции в capped
@@ -153,10 +249,16 @@ async def handle_compose(payload: dict) -> None:
                 sources = list(dict.fromkeys(capped[i].url for i in idxs))
                 db.add(
                     News(
+                        project_id=run.project_id,
                         run_id=run.id,
                         title=g["title"][:300],
                         content=g["content"],
                         sources=sources,
+                        category=schema.category_enum_name(g.get("category")),
+                        importance=schema.importance_enum_name(g.get("importance")),
+                        doc_type=schema.doc_type_enum_name(g.get("doc_type")),
+                        entities=_entities_with_date(g.get("entities"), [capped[i] for i in idxs]),
+                        tags=[],
                     )
                 )
                 n_news += 1

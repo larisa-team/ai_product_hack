@@ -14,6 +14,9 @@ option go_package = "gen/monitoring/v1;monitoringv1";
 enum SourceType {
   SOURCE_TYPE_UNSPECIFIED = 0;
   SOURCE_TYPE_TELEGRAM = 1;
+  // RSS/Atom-лента. Одним коннектором закрываются и СМИ, и сайты регуляторов —
+  // категория источника это ярлык (Source.label), а не технология парсинга.
+  SOURCE_TYPE_RSS = 2;
 }
 
 enum RunState {
@@ -27,6 +30,30 @@ enum FilterType {
   PROMT_BASED = 0;
 }
 
+// Категория материала (REQUIREMENTS.md, решение Р5).
+enum NewsCategory {
+  NEWS_CATEGORY_UNSPECIFIED = 0;
+  NEWS_CATEGORY_REGULATORY = 1; // регуляторика
+  NEWS_CATEGORY_REPUTATION = 2; // репутация
+  NEWS_CATEGORY_COMPETITORS = 3; // конкуренты
+  NEWS_CATEGORY_TRENDS = 4; // тренды
+}
+
+// Приоритет материала.
+enum NewsImportance {
+  NEWS_IMPORTANCE_UNSPECIFIED = 0;
+  NEWS_IMPORTANCE_HIGH = 1;
+  NEWS_IMPORTANCE_MEDIUM = 2;
+  NEWS_IMPORTANCE_LOW = 3;
+}
+
+// Тип документа: нормативно-правовой акт или новостная статья.
+enum DocType {
+  DOC_TYPE_UNSPECIFIED = 0;
+  DOC_TYPE_NEWS = 1;
+  DOC_TYPE_NPA = 2;
+}
+
 // =====================================================
 // Проекты
 // =====================================================
@@ -38,7 +65,15 @@ message ProjectFilter {
 
 message Source {
   SourceType type = 1;
-  string telegram = 2;
+  string telegram = 2; // когда type == SOURCE_TYPE_TELEGRAM
+  string rss_url = 3; // когда type == SOURCE_TYPE_RSS
+  // Человекочитаемое имя источника: «ЦБ РФ (регулятор)», «РБК». Несёт категорию
+  // источника для UI — отдельного enum категории сознательно нет.
+  string label = 4;
+  // Источник на паузе: не опрашивается, но не удалён.
+  // Именно `disabled`, а не `enabled`: у скаляров proto3 нет presence, пропущенное
+  // `enabled` пришло бы как false и молча выключило бы все существующие источники.
+  bool disabled = 5;
 }
 
 message Project {
@@ -103,10 +138,31 @@ message DeleteProjectRequest {
 // Запуски
 // =====================================================
 
+// Сущности события: кто / что / когда / последствия (решение Р5).
+message NewsEntities {
+  string who = 1;
+  string what = 2;
+  string when = 3;
+  string consequences = 4;
+}
+
+// Карточка события: один факт, о котором сообщили один или несколько источников.
 message News {
   string title = 1;
   string content = 2;
   repeated string sources = 3;
+  int32 id = 4;
+  string project_id = 5;
+  // Прогон, в котором карточка появилась. Пусто у материалов, добавленных вручную.
+  string run_id = 6;
+  NewsCategory category = 7;
+  NewsImportance importance = 8;
+  DocType doc_type = 9;
+  NewsEntities entities = 10;
+  repeated string tags = 11;
+  // Скрыто из ленты. Данные при этом не удаляются.
+  bool hidden = 12;
+  google.protobuf.Timestamp created_at = 13;
 }
 
 // Итоги прогона: сколько собрано, сколько прошло фильтр, сколько новостей получилось.
@@ -155,6 +211,64 @@ message ListRunsResponse {
 }
 
 // =====================================================
+// Лента новостей
+// =====================================================
+
+message ListNewsRequest {
+  string project_id = 1;
+  // OR-фильтры: пустой список — не фильтровать по этому измерению.
+  repeated NewsCategory categories = 2;
+  repeated NewsImportance importances = 3;
+  // Точное совпадение с одним из News.sources.
+  string source = 4;
+  google.protobuf.Timestamp from = 5;
+  google.protobuf.Timestamp to = 6;
+  // Текстовый поиск по заголовку и содержимому.
+  string q = 7;
+  bool include_hidden = 8;
+  int32 page_size = 9;
+  string page_token = 10;
+}
+
+message ListNewsResponse {
+  repeated News news = 1;
+  string next_page_token = 2;
+  int32 total = 3;
+}
+
+message UpdateNewsRequest {
+  int32 id = 1;
+  string title = 2;
+  string content = 3;
+  NewsCategory category = 4;
+  NewsImportance importance = 5;
+  repeated string tags = 6;
+  bool hidden = 7;
+  // Обязательна: у hidden/title/tags пустое значение легитимно («показать обратно»,
+  // «очистить теги») и без маски неотличимо от «поле не прислали».
+  google.protobuf.FieldMask update_mask = 8;
+}
+
+message UpdateNewsResponse {
+  News news = 1;
+}
+
+message CreateNewsRequest {
+  string project_id = 1;
+  string title = 2;
+  string content = 3;
+  NewsCategory category = 4;
+  NewsImportance importance = 5;
+  DocType doc_type = 6;
+  repeated string tags = 7;
+  repeated string sources = 8;
+}
+
+message CreateNewsResponse {
+  News news = 1;
+}
+
+// =====================================================
 // Сервисы
 // =====================================================
 
@@ -170,4 +284,13 @@ service RunService {
   rpc StartRun(StartRunRequest) returns (StartRunResponse);
   rpc GetRun(GetRunRequest) returns (GetRunResponse);
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+}
+
+// Лента проекта: чтение с фильтрами, правка карточки, ручное добавление.
+// Управления источниками здесь нет намеренно — это UpdateProject с
+// update_mask: ["sources"] и новым массивом.
+service NewsService {
+  rpc ListNews(ListNewsRequest) returns (ListNewsResponse);
+  rpc UpdateNews(UpdateNewsRequest) returns (UpdateNewsResponse);
+  rpc CreateNews(CreateNewsRequest) returns (CreateNewsResponse);
 }

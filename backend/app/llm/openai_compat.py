@@ -1,6 +1,7 @@
 """OpenAI-совместимый провайдер (RouterAI, OpenAI, локальные прокси)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -8,9 +9,13 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.llm import schema
 from app.llm.provider import NewsGroup
 
 log = logging.getLogger(__name__)
+
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_NETWORK_RETRIES = 3
 
 _FILTER_SYS = (
     "Ты фильтр релевантности для мониторинга темы «{topic}».\n"
@@ -22,14 +27,24 @@ _FILTER_SYS = (
 )
 
 _NEWS_SYS = (
-    "Ты аналитик темы «{topic}». Тебе дан JSON-массив сообщений из Telegram-каналов.\n"
+    "Ты аналитик темы «{topic}». Тебе дан JSON-массив сообщений из СМИ, сайтов регуляторов "
+    "и Telegram-каналов.\n"
     "Сгруппируй сообщения, относящиеся к ОДНОМУ И ТОМУ ЖЕ событию, и для каждой группы составь "
     "одну новость: короткий конкретный заголовок и текст в 3–5 предложений по сути события.\n"
+    "Для каждой группы также определи:\n"
+    "  category — одно из: регуляторика | репутация | конкуренты | тренды;\n"
+    "  importance — одно из: high | medium | low (high — если есть риск штрафов, проверок, "
+    "суда, отзыва лицензии, кризис или вступающее в силу требование);\n"
+    "  doc_type — npa для нормативно-правового акта, news для новостной статьи;\n"
+    "  entities — кто (who), что (what), когда (when), последствия (consequences); "
+    "если чего-то в тексте нет, оставь пустую строку, не выдумывай.\n"
     "ВАЖНО: обработай ВСЕ сообщения из входного массива. Каждый индекс должен попасть ровно "
     "в одну группу; сообщение, ни с чем не совпавшее, становится отдельной новостью. "
     "Не рассуждай долго — сразу давай результат.\n"
     'Ответ — строго JSON вида {{"news": [{{"title": "...", "content": "...", '
-    '"message_indices": [<индексы>]}}]}}. Без пояснений и markdown.'
+    '"message_indices": [<индексы>], "category": "...", "importance": "...", '
+    '"doc_type": "...", "entities": {{"who": "...", "what": "...", "when": "...", '
+    '"consequences": "..."}}}}]}}. Без пояснений и markdown.'
 )
 
 
@@ -67,8 +82,22 @@ class OpenAICompatProvider:
             title = str(row.get("title") or "").strip()
             content = str(row.get("content") or "").strip()
             idxs = [i for i in row.get("message_indices", []) if isinstance(i, int) and 0 <= i < n]
-            if title and content and idxs:
-                out.append({"title": title, "content": content, "message_indices": idxs})
+            if not (title and content and idxs):
+                continue
+            # Поля обогащения читаем терпимо: пропущенное или незнакомое значение
+            # станет *_UNSPECIFIED в app/llm/schema.py, но новость не потеряется.
+            entities = row.get("entities")
+            out.append(
+                {
+                    "title": title,
+                    "content": content,
+                    "message_indices": idxs,
+                    "category": str(row.get("category") or "").strip(),
+                    "importance": str(row.get("importance") or "").strip(),
+                    "doc_type": str(row.get("doc_type") or "").strip(),
+                    "entities": schema.entities_dict(entities if isinstance(entities, dict) else None),
+                }
+            )
         return out
 
     # --- внутреннее ---
@@ -90,10 +119,9 @@ class OpenAICompatProvider:
 
         async with httpx.AsyncClient(timeout=180) as client:
             for attempt in range(3):
-                resp = await client.post(
-                    f"{self.base_url}/chat/completions", json=payload, headers=headers
+                resp = await _post_with_retry(
+                    client, f"{self.base_url}/chat/completions", payload, headers
                 )
-                resp.raise_for_status()
                 content = resp.json()["choices"][0]["message"]["content"]
                 try:
                     parsed = _loads_lenient(content)
@@ -107,6 +135,45 @@ class OpenAICompatProvider:
                         {"role": "user", "content": "Верни ТОЛЬКО валидный JSON, без markdown."}
                     )
         raise RuntimeError("LLM не вернул валидный JSON после 3 попыток")
+
+
+async def _post_with_retry(
+    client: httpx.AsyncClient, url: str, payload: dict[str, Any], headers: dict[str, str]
+) -> httpx.Response:
+    """POST с ретраем на транспортные ошибки и 429/5xx (не на 4xx вроде 400/401).
+
+    Отдельно от ретрая на «невалидный JSON» в _complete_json — тот про содержимое ответа,
+    этот про то, что ответ вообще дошёл.
+    """
+    delay = 1.0
+    for attempt in range(_NETWORK_RETRIES):
+        last = attempt == _NETWORK_RETRIES - 1
+        try:
+            resp = await client.post(url, json=payload, headers=headers)
+        except httpx.TransportError as exc:
+            if last:
+                raise
+            log.warning(
+                "LLM: сетевая ошибка (попытка %d/%d): %s — повтор через %.0fс",
+                attempt + 1, _NETWORK_RETRIES, exc, delay,
+            )
+            await asyncio.sleep(delay)
+            delay *= 2
+            continue
+
+        if resp.status_code in _RETRYABLE_STATUS and not last:
+            log.warning(
+                "LLM: ответ %d (попытка %d/%d) — повтор через %.0fс",
+                resp.status_code, attempt + 1, _NETWORK_RETRIES, delay,
+            )
+            await asyncio.sleep(delay)
+            delay *= 2
+            continue
+
+        resp.raise_for_status()  # некоретраибельная 4xx — сразу наружу; исчерпанный retryable — тоже
+        return resp
+
+    raise RuntimeError("unreachable")  # цикл всегда либо return, либо raise
 
 
 def _loads_lenient(text: str) -> Any:

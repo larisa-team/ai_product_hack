@@ -19,11 +19,20 @@ export enum SourceType {
    * @generated from enum value: SOURCE_TYPE_TELEGRAM = 1;
    */
   TELEGRAM = 1,
+
+  /**
+   * RSS/Atom-лента. Одним коннектором закрываются и СМИ, и сайты регуляторов —
+   * категория источника это ярлык (Source.label), а не технология парсинга.
+   *
+   * @generated from enum value: SOURCE_TYPE_RSS = 2;
+   */
+  RSS = 2,
 }
 // Retrieve enum metadata with: proto3.getEnumType(SourceType)
 proto3.util.setEnumType(SourceType, "monitoring.v1.SourceType", [
   { no: 0, name: "SOURCE_TYPE_UNSPECIFIED" },
   { no: 1, name: "SOURCE_TYPE_TELEGRAM" },
+  { no: 2, name: "SOURCE_TYPE_RSS" },
 ]);
 
 /**
@@ -70,6 +79,116 @@ export enum FilterType {
 // Retrieve enum metadata with: proto3.getEnumType(FilterType)
 proto3.util.setEnumType(FilterType, "monitoring.v1.FilterType", [
   { no: 0, name: "PROMT_BASED" },
+]);
+
+/**
+ * Категория материала (REQUIREMENTS.md, решение Р5).
+ *
+ * @generated from enum monitoring.v1.NewsCategory
+ */
+export enum NewsCategory {
+  /**
+   * @generated from enum value: NEWS_CATEGORY_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * регуляторика
+   *
+   * @generated from enum value: NEWS_CATEGORY_REGULATORY = 1;
+   */
+  REGULATORY = 1,
+
+  /**
+   * репутация
+   *
+   * @generated from enum value: NEWS_CATEGORY_REPUTATION = 2;
+   */
+  REPUTATION = 2,
+
+  /**
+   * конкуренты
+   *
+   * @generated from enum value: NEWS_CATEGORY_COMPETITORS = 3;
+   */
+  COMPETITORS = 3,
+
+  /**
+   * тренды
+   *
+   * @generated from enum value: NEWS_CATEGORY_TRENDS = 4;
+   */
+  TRENDS = 4,
+}
+// Retrieve enum metadata with: proto3.getEnumType(NewsCategory)
+proto3.util.setEnumType(NewsCategory, "monitoring.v1.NewsCategory", [
+  { no: 0, name: "NEWS_CATEGORY_UNSPECIFIED" },
+  { no: 1, name: "NEWS_CATEGORY_REGULATORY" },
+  { no: 2, name: "NEWS_CATEGORY_REPUTATION" },
+  { no: 3, name: "NEWS_CATEGORY_COMPETITORS" },
+  { no: 4, name: "NEWS_CATEGORY_TRENDS" },
+]);
+
+/**
+ * Приоритет материала.
+ *
+ * @generated from enum monitoring.v1.NewsImportance
+ */
+export enum NewsImportance {
+  /**
+   * @generated from enum value: NEWS_IMPORTANCE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: NEWS_IMPORTANCE_HIGH = 1;
+   */
+  HIGH = 1,
+
+  /**
+   * @generated from enum value: NEWS_IMPORTANCE_MEDIUM = 2;
+   */
+  MEDIUM = 2,
+
+  /**
+   * @generated from enum value: NEWS_IMPORTANCE_LOW = 3;
+   */
+  LOW = 3,
+}
+// Retrieve enum metadata with: proto3.getEnumType(NewsImportance)
+proto3.util.setEnumType(NewsImportance, "monitoring.v1.NewsImportance", [
+  { no: 0, name: "NEWS_IMPORTANCE_UNSPECIFIED" },
+  { no: 1, name: "NEWS_IMPORTANCE_HIGH" },
+  { no: 2, name: "NEWS_IMPORTANCE_MEDIUM" },
+  { no: 3, name: "NEWS_IMPORTANCE_LOW" },
+]);
+
+/**
+ * Тип документа: нормативно-правовой акт или новостная статья.
+ *
+ * @generated from enum monitoring.v1.DocType
+ */
+export enum DocType {
+  /**
+   * @generated from enum value: DOC_TYPE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: DOC_TYPE_NEWS = 1;
+   */
+  NEWS = 1,
+
+  /**
+   * @generated from enum value: DOC_TYPE_NPA = 2;
+   */
+  NPA = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(DocType)
+proto3.util.setEnumType(DocType, "monitoring.v1.DocType", [
+  { no: 0, name: "DOC_TYPE_UNSPECIFIED" },
+  { no: 1, name: "DOC_TYPE_NEWS" },
+  { no: 2, name: "DOC_TYPE_NPA" },
 ]);
 
 /**
@@ -125,9 +244,35 @@ export class Source extends Message<Source> {
   type = SourceType.UNSPECIFIED;
 
   /**
+   * когда type == SOURCE_TYPE_TELEGRAM
+   *
    * @generated from field: string telegram = 2;
    */
   telegram = "";
+
+  /**
+   * когда type == SOURCE_TYPE_RSS
+   *
+   * @generated from field: string rss_url = 3;
+   */
+  rssUrl = "";
+
+  /**
+   * Человекочитаемое имя источника: «ЦБ РФ (регулятор)», «РБК». Несёт категорию
+   * источника для UI — отдельного enum категории сознательно нет.
+   *
+   * @generated from field: string label = 4;
+   */
+  label = "";
+
+  /**
+   * Источник на паузе: не опрашивается, но не удалён.
+   * Именно `disabled`, а не `enabled`: у скаляров proto3 нет presence, пропущенное
+   * `enabled` пришло бы как false и молча выключило бы все существующие источники.
+   *
+   * @generated from field: bool disabled = 5;
+   */
+  disabled = false;
 
   constructor(data?: PartialMessage<Source>) {
     super();
@@ -139,6 +284,9 @@ export class Source extends Message<Source> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "type", kind: "enum", T: proto3.getEnumType(SourceType) },
     { no: 2, name: "telegram", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "rss_url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "label", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "disabled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Source {
@@ -656,6 +804,65 @@ export class DeleteProjectRequest extends Message<DeleteProjectRequest> {
 }
 
 /**
+ * Сущности события: кто / что / когда / последствия (решение Р5).
+ *
+ * @generated from message monitoring.v1.NewsEntities
+ */
+export class NewsEntities extends Message<NewsEntities> {
+  /**
+   * @generated from field: string who = 1;
+   */
+  who = "";
+
+  /**
+   * @generated from field: string what = 2;
+   */
+  what = "";
+
+  /**
+   * @generated from field: string when = 3;
+   */
+  when = "";
+
+  /**
+   * @generated from field: string consequences = 4;
+   */
+  consequences = "";
+
+  constructor(data?: PartialMessage<NewsEntities>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "monitoring.v1.NewsEntities";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "who", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "what", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "when", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "consequences", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NewsEntities {
+    return new NewsEntities().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NewsEntities {
+    return new NewsEntities().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NewsEntities {
+    return new NewsEntities().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NewsEntities | PlainMessage<NewsEntities> | undefined, b: NewsEntities | PlainMessage<NewsEntities> | undefined): boolean {
+    return proto3.util.equals(NewsEntities, a, b);
+  }
+}
+
+/**
+ * Карточка события: один факт, о котором сообщили один или несколько источников.
+ *
  * @generated from message monitoring.v1.News
  */
 export class News extends Message<News> {
@@ -674,6 +881,60 @@ export class News extends Message<News> {
    */
   sources: string[] = [];
 
+  /**
+   * @generated from field: int32 id = 4;
+   */
+  id = 0;
+
+  /**
+   * @generated from field: string project_id = 5;
+   */
+  projectId = "";
+
+  /**
+   * Прогон, в котором карточка появилась. Пусто у материалов, добавленных вручную.
+   *
+   * @generated from field: string run_id = 6;
+   */
+  runId = "";
+
+  /**
+   * @generated from field: monitoring.v1.NewsCategory category = 7;
+   */
+  category = NewsCategory.UNSPECIFIED;
+
+  /**
+   * @generated from field: monitoring.v1.NewsImportance importance = 8;
+   */
+  importance = NewsImportance.UNSPECIFIED;
+
+  /**
+   * @generated from field: monitoring.v1.DocType doc_type = 9;
+   */
+  docType = DocType.UNSPECIFIED;
+
+  /**
+   * @generated from field: monitoring.v1.NewsEntities entities = 10;
+   */
+  entities?: NewsEntities;
+
+  /**
+   * @generated from field: repeated string tags = 11;
+   */
+  tags: string[] = [];
+
+  /**
+   * Скрыто из ленты. Данные при этом не удаляются.
+   *
+   * @generated from field: bool hidden = 12;
+   */
+  hidden = false;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp created_at = 13;
+   */
+  createdAt?: Timestamp;
+
   constructor(data?: PartialMessage<News>) {
     super();
     proto3.util.initPartial(data, this);
@@ -685,6 +946,16 @@ export class News extends Message<News> {
     { no: 1, name: "title", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "content", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "sources", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 4, name: "id", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
+    { no: 5, name: "project_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "run_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "category", kind: "enum", T: proto3.getEnumType(NewsCategory) },
+    { no: 8, name: "importance", kind: "enum", T: proto3.getEnumType(NewsImportance) },
+    { no: 9, name: "doc_type", kind: "enum", T: proto3.getEnumType(DocType) },
+    { no: 10, name: "entities", kind: "message", T: NewsEntities },
+    { no: 11, name: "tags", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 12, name: "hidden", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 13, name: "created_at", kind: "message", T: Timestamp },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): News {
@@ -1067,6 +1338,387 @@ export class ListRunsResponse extends Message<ListRunsResponse> {
 
   static equals(a: ListRunsResponse | PlainMessage<ListRunsResponse> | undefined, b: ListRunsResponse | PlainMessage<ListRunsResponse> | undefined): boolean {
     return proto3.util.equals(ListRunsResponse, a, b);
+  }
+}
+
+/**
+ * @generated from message monitoring.v1.ListNewsRequest
+ */
+export class ListNewsRequest extends Message<ListNewsRequest> {
+  /**
+   * @generated from field: string project_id = 1;
+   */
+  projectId = "";
+
+  /**
+   * OR-фильтры: пустой список — не фильтровать по этому измерению.
+   *
+   * @generated from field: repeated monitoring.v1.NewsCategory categories = 2;
+   */
+  categories: NewsCategory[] = [];
+
+  /**
+   * @generated from field: repeated monitoring.v1.NewsImportance importances = 3;
+   */
+  importances: NewsImportance[] = [];
+
+  /**
+   * Точное совпадение с одним из News.sources.
+   *
+   * @generated from field: string source = 4;
+   */
+  source = "";
+
+  /**
+   * @generated from field: google.protobuf.Timestamp from = 5;
+   */
+  from?: Timestamp;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp to = 6;
+   */
+  to?: Timestamp;
+
+  /**
+   * Текстовый поиск по заголовку и содержимому.
+   *
+   * @generated from field: string q = 7;
+   */
+  q = "";
+
+  /**
+   * @generated from field: bool include_hidden = 8;
+   */
+  includeHidden = false;
+
+  /**
+   * @generated from field: int32 page_size = 9;
+   */
+  pageSize = 0;
+
+  /**
+   * @generated from field: string page_token = 10;
+   */
+  pageToken = "";
+
+  constructor(data?: PartialMessage<ListNewsRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "monitoring.v1.ListNewsRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "project_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "categories", kind: "enum", T: proto3.getEnumType(NewsCategory), repeated: true },
+    { no: 3, name: "importances", kind: "enum", T: proto3.getEnumType(NewsImportance), repeated: true },
+    { no: 4, name: "source", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "from", kind: "message", T: Timestamp },
+    { no: 6, name: "to", kind: "message", T: Timestamp },
+    { no: 7, name: "q", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 8, name: "include_hidden", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 9, name: "page_size", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
+    { no: 10, name: "page_token", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ListNewsRequest {
+    return new ListNewsRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ListNewsRequest {
+    return new ListNewsRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ListNewsRequest {
+    return new ListNewsRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ListNewsRequest | PlainMessage<ListNewsRequest> | undefined, b: ListNewsRequest | PlainMessage<ListNewsRequest> | undefined): boolean {
+    return proto3.util.equals(ListNewsRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message monitoring.v1.ListNewsResponse
+ */
+export class ListNewsResponse extends Message<ListNewsResponse> {
+  /**
+   * @generated from field: repeated monitoring.v1.News news = 1;
+   */
+  news: News[] = [];
+
+  /**
+   * @generated from field: string next_page_token = 2;
+   */
+  nextPageToken = "";
+
+  /**
+   * @generated from field: int32 total = 3;
+   */
+  total = 0;
+
+  constructor(data?: PartialMessage<ListNewsResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "monitoring.v1.ListNewsResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "news", kind: "message", T: News, repeated: true },
+    { no: 2, name: "next_page_token", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "total", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ListNewsResponse {
+    return new ListNewsResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ListNewsResponse {
+    return new ListNewsResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ListNewsResponse {
+    return new ListNewsResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ListNewsResponse | PlainMessage<ListNewsResponse> | undefined, b: ListNewsResponse | PlainMessage<ListNewsResponse> | undefined): boolean {
+    return proto3.util.equals(ListNewsResponse, a, b);
+  }
+}
+
+/**
+ * @generated from message monitoring.v1.UpdateNewsRequest
+ */
+export class UpdateNewsRequest extends Message<UpdateNewsRequest> {
+  /**
+   * @generated from field: int32 id = 1;
+   */
+  id = 0;
+
+  /**
+   * @generated from field: string title = 2;
+   */
+  title = "";
+
+  /**
+   * @generated from field: string content = 3;
+   */
+  content = "";
+
+  /**
+   * @generated from field: monitoring.v1.NewsCategory category = 4;
+   */
+  category = NewsCategory.UNSPECIFIED;
+
+  /**
+   * @generated from field: monitoring.v1.NewsImportance importance = 5;
+   */
+  importance = NewsImportance.UNSPECIFIED;
+
+  /**
+   * @generated from field: repeated string tags = 6;
+   */
+  tags: string[] = [];
+
+  /**
+   * @generated from field: bool hidden = 7;
+   */
+  hidden = false;
+
+  /**
+   * Обязательна: у hidden/title/tags пустое значение легитимно («показать обратно»,
+   * «очистить теги») и без маски неотличимо от «поле не прислали».
+   *
+   * @generated from field: google.protobuf.FieldMask update_mask = 8;
+   */
+  updateMask?: FieldMask;
+
+  constructor(data?: PartialMessage<UpdateNewsRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "monitoring.v1.UpdateNewsRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "id", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
+    { no: 2, name: "title", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "content", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "category", kind: "enum", T: proto3.getEnumType(NewsCategory) },
+    { no: 5, name: "importance", kind: "enum", T: proto3.getEnumType(NewsImportance) },
+    { no: 6, name: "tags", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 7, name: "hidden", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 8, name: "update_mask", kind: "message", T: FieldMask },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): UpdateNewsRequest {
+    return new UpdateNewsRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): UpdateNewsRequest {
+    return new UpdateNewsRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): UpdateNewsRequest {
+    return new UpdateNewsRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: UpdateNewsRequest | PlainMessage<UpdateNewsRequest> | undefined, b: UpdateNewsRequest | PlainMessage<UpdateNewsRequest> | undefined): boolean {
+    return proto3.util.equals(UpdateNewsRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message monitoring.v1.UpdateNewsResponse
+ */
+export class UpdateNewsResponse extends Message<UpdateNewsResponse> {
+  /**
+   * @generated from field: monitoring.v1.News news = 1;
+   */
+  news?: News;
+
+  constructor(data?: PartialMessage<UpdateNewsResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "monitoring.v1.UpdateNewsResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "news", kind: "message", T: News },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): UpdateNewsResponse {
+    return new UpdateNewsResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): UpdateNewsResponse {
+    return new UpdateNewsResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): UpdateNewsResponse {
+    return new UpdateNewsResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: UpdateNewsResponse | PlainMessage<UpdateNewsResponse> | undefined, b: UpdateNewsResponse | PlainMessage<UpdateNewsResponse> | undefined): boolean {
+    return proto3.util.equals(UpdateNewsResponse, a, b);
+  }
+}
+
+/**
+ * @generated from message monitoring.v1.CreateNewsRequest
+ */
+export class CreateNewsRequest extends Message<CreateNewsRequest> {
+  /**
+   * @generated from field: string project_id = 1;
+   */
+  projectId = "";
+
+  /**
+   * @generated from field: string title = 2;
+   */
+  title = "";
+
+  /**
+   * @generated from field: string content = 3;
+   */
+  content = "";
+
+  /**
+   * @generated from field: monitoring.v1.NewsCategory category = 4;
+   */
+  category = NewsCategory.UNSPECIFIED;
+
+  /**
+   * @generated from field: monitoring.v1.NewsImportance importance = 5;
+   */
+  importance = NewsImportance.UNSPECIFIED;
+
+  /**
+   * @generated from field: monitoring.v1.DocType doc_type = 6;
+   */
+  docType = DocType.UNSPECIFIED;
+
+  /**
+   * @generated from field: repeated string tags = 7;
+   */
+  tags: string[] = [];
+
+  /**
+   * @generated from field: repeated string sources = 8;
+   */
+  sources: string[] = [];
+
+  constructor(data?: PartialMessage<CreateNewsRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "monitoring.v1.CreateNewsRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "project_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "title", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "content", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "category", kind: "enum", T: proto3.getEnumType(NewsCategory) },
+    { no: 5, name: "importance", kind: "enum", T: proto3.getEnumType(NewsImportance) },
+    { no: 6, name: "doc_type", kind: "enum", T: proto3.getEnumType(DocType) },
+    { no: 7, name: "tags", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 8, name: "sources", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CreateNewsRequest {
+    return new CreateNewsRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CreateNewsRequest {
+    return new CreateNewsRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CreateNewsRequest {
+    return new CreateNewsRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: CreateNewsRequest | PlainMessage<CreateNewsRequest> | undefined, b: CreateNewsRequest | PlainMessage<CreateNewsRequest> | undefined): boolean {
+    return proto3.util.equals(CreateNewsRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message monitoring.v1.CreateNewsResponse
+ */
+export class CreateNewsResponse extends Message<CreateNewsResponse> {
+  /**
+   * @generated from field: monitoring.v1.News news = 1;
+   */
+  news?: News;
+
+  constructor(data?: PartialMessage<CreateNewsResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "monitoring.v1.CreateNewsResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "news", kind: "message", T: News },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CreateNewsResponse {
+    return new CreateNewsResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CreateNewsResponse {
+    return new CreateNewsResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CreateNewsResponse {
+    return new CreateNewsResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: CreateNewsResponse | PlainMessage<CreateNewsResponse> | undefined, b: CreateNewsResponse | PlainMessage<CreateNewsResponse> | undefined): boolean {
+    return proto3.util.equals(CreateNewsResponse, a, b);
   }
 }
 

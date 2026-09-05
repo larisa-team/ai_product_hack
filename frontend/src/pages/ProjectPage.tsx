@@ -30,6 +30,10 @@ const STATE_LABEL: Record<number, string> = {
   [RunState.FAILED]: "ошибка",
 };
 
+// Если Run висит в STARTED дольше этого — считаем, что воркер, вероятно, умер,
+// и даём пользователю кнопку перезапуска вместо вечного спиннера.
+const STUCK_AFTER_MS = 90_000;
+
 export default function ProjectPage() {
   const { id = "" } = useParams();
   const [params, setParams] = useSearchParams();
@@ -71,6 +75,11 @@ export default function ProjectPage() {
   if (project.isError) return <Alert color="red">{(project.error as Error).message}</Alert>;
   const p = project.data!;
   const r = run.data;
+  const isStuck =
+    !!r &&
+    r.state === RunState.STARTED &&
+    !!r.createdAt &&
+    Date.now() - r.createdAt.toDate().getTime() > STUCK_AFTER_MS;
 
   return (
     <Stack gap="lg">
@@ -103,6 +112,27 @@ export default function ProjectPage() {
       </Group>
 
       {start.isError && <Alert color="red">{(start.error as Error).message}</Alert>}
+
+      {isStuck && (
+        <Alert color="yellow" title="Обработка идёт необычно долго">
+          <Group justify="space-between" wrap="nowrap">
+            <Text size="sm">
+              Прошло больше {Math.round(STUCK_AFTER_MS / 1000)} секунд, а запуск всё ещё
+              «идёт обработка». Возможно, воркер недоступен — можно проверить
+              {" "}<code>docker compose logs worker</code> или запустить заново.
+            </Text>
+            <Button
+              size="xs"
+              variant="light"
+              color="yellow"
+              onClick={() => start.mutate()}
+              loading={start.isPending}
+            >
+              Запустить заново
+            </Button>
+          </Group>
+        </Alert>
+      )}
 
       {r && (
         <Card withBorder padding="md">
