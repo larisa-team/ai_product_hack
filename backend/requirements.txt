@@ -6,3 +6,16 @@ asyncpg>=0.29.0
 psycopg2-binary>=2.9.0
 alembic>=1.13.0
 pydantic>=2.5.0
+
+# --- HTTP / Connect-RPC ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic-settings>=2.6.0
+
+# --- Воркер и внешние источники ---
+redis>=5.2.0
+httpx>=0.27.0
+selectolax>=0.3.0
+feedparser>=6.0.0
+pymorphy3>=2.0.0
+python-dateutil>=2.9.0

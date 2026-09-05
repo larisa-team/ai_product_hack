@@ -1,21 +1,77 @@
+name: ai-product-hack
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/app
+  REDIS_URL: redis://redis:6379/0
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+  DEBUG: ${DEBUG:-false}
+  LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_MODEL: ${LLM_MODEL:-}
+  TG_FETCH_LIMIT: ${TG_FETCH_LIMIT:-100}
+  TG_FETCH_DAYS: ${TG_FETCH_DAYS:-7}
+  RSS_FETCH_LIMIT: ${RSS_FETCH_LIMIT:-50}
+  RSS_FETCH_DAYS: ${RSS_FETCH_DAYS:-7}
+  FILTER_BATCH: ${FILTER_BATCH:-30}
+  NEWSMAKER_CAP: ${NEWSMAKER_CAP:-100}
+  NEWSMAKER_BATCH: ${NEWSMAKER_BATCH:-12}
+
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: monitoring-postgres
-    restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: monitoring
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment: *backend-env
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    command: python -m app.worker.loop
+    environment: *backend-env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
 
 volumes:
-  postgres_data:
+  pgdata:

@@ -1,5 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
 from app.database.models import Run
 
 
@@ -15,6 +17,13 @@ class RunRepository:
     async def get_by_id(self, run_id: str) -> Run | None:
         result = await self.db.execute(
             select(Run).where(Run.id == run_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_with_news(self, run_id: str) -> Run | None:
+        """Run вместе с новостями — в async ленивая подгрузка недоступна."""
+        result = await self.db.execute(
+            select(Run).where(Run.id == run_id).options(selectinload(Run.news))
         )
         return result.scalar_one_or_none()
 

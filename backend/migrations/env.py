@@ -18,8 +18,19 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
+from app.config import settings
 from app.database.models import Base
+
 target_metadata = Base.metadata
+
+
+def _sync_url() -> str:
+    """URL из настроек, но синхронным драйвером — Alembic работает без asyncio."""
+    return settings.DATABASE_URL.replace("+asyncpg", "").replace("+psycopg", "")
+
+
+# Единый источник правды для адреса БД: settings, а не sqlalchemy.url из alembic.ini
+config.set_main_option("sqlalchemy.url", _sync_url())
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:

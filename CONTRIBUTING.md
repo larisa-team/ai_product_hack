@@ -77,27 +77,54 @@ make lint
 
 ```
 .
-├── proto/                          # Исходные .proto файлы (источник правды)
-│   └── monitoring/v1/
-│       └── monitoring.proto
+├── proto/monitoring/v1/monitoring.proto   # Источник правды
 ├── backend/
-│   ├── gen/                        # Сгенерированный Python код (не коммитится!)
-│   │   └── monitoring/v1/
-│   └── app/                        # Код бэкенда (пишите здесь)
+│   ├── gen/                        # Сгенерированный Python код (коммитится)
+│   ├── app/                        # Код бэкенда (пишите здесь)
+│   └── migrations/                 # Alembic
 ├── frontend/
-│   ├── node_modules/               # JS зависимости (не коммитится!)
+│   ├── node_modules/               # JS зависимости (не коммитится)
 │   └── src/
-│       ├── gen/                    # Сгенерированный TS код (не коммитится!)
-│       └── ...                     # Код фронтенда (пишите здесь)
-├── .venv/                          # Python виртуальное окружение (не коммитится!)
+│       ├── gen/                    # Сгенерированный TS код (коммитится)
+│       ├── api/client.ts           # Connect-клиенты
+│       └── pages/                  # Код фронтенда (пишите здесь)
+├── .venv/                          # Python виртуальное окружение (не коммитится)
+├── docker-compose.yml              # Стек: postgres, redis, backend, worker, frontend
 ├── buf.yaml                        # Конфигурация linting для buf
 ├── Makefile                        # Команды автоматизации
-├── .gitignore                      # Что не коммитить
 ├── CONTRIBUTING.md                 # Этот файл
 └── README.md
 ```
 
-**Важно:** директории `backend/gen/`, `frontend/src/gen/`, `node_modules/` и `.venv/` **не коммитятся** в git. Они перечислены в `.gitignore` и восстанавливаются командами выше.
+**Про сгенерированный код.** `backend/gen/` и `frontend/src/gen/` **коммитятся** — иначе
+`docker compose build` не соберётся без предварительного `make generate` (Dockerfile копирует
+`gen/` из контекста сборки). После правки `.proto` перегенерируйте и коммитьте вместе с ним.
+`node_modules/` и `.venv/` в git не попадают.
+
+---
+
+## 🚀 Запуск приложения
+
+```bash
+make up          # весь стек; первая сборка фронта ~5-8 мин (npm install)
+make migrate     # применить миграции
+```
+
+Открыть **http://localhost**. Проверка: `curl localhost/api/health`.
+
+Во время работы над бэкендом фронт можно не поднимать:
+
+```bash
+make dev         # postgres + redis + backend + worker
+make logs        # логи воркера (make logs s=backend)
+make down        # остановить
+```
+
+`backend` запущен с `--reload`, воркер — нет: после правок в `app/worker`, `app/llm`,
+`app/ingestion` выполните `docker compose up -d worker`.
+
+По умолчанию LLM работает в режиме `mock` (без сети). Ключ RouterAI кладётся в `.env`
+(см. `.env.example`), `.env` в git не попадает.
 
 ---
 
@@ -181,11 +208,13 @@ make generate
 
 ## ✅ Чеклист перед коммитом
 
-- [ ] Я изменил(а) только исходный код (не `backend/gen/`, не `frontend/src/gen/`)
+- [ ] Я не правил(а) файлы в `backend/gen/` и `frontend/src/gen/` руками
+- [ ] Если менял(а) `.proto` — выполнил(а) `make generate` и закоммитил(а) результат
 - [ ] Я изменил(а) `proto`-файл, если менял(а) API
 - [ ] `make lint` проходит без ошибок
 - [ ] `make generate` работает без ошибок
-- [ ] Мой код работает локально
+- [ ] `make test` проходит без ошибок (юнит-тесты на чистой логике, без Docker-сети)
+- [ ] Мой код работает локально; для изменений в worker/API — `make smoke` зелёный
 
 ---
 

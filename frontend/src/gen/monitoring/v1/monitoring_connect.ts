@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { CreateProjectRequest, CreateProjectResponse, DeleteProjectRequest, DeleteProjectResponse, GetProjectRequest, GetProjectResponse, GetRunRequest, GetRunResponse, ListProjectsRequest, ListProjectsResponse, ListRunsRequest, ListRunsResponse, StartRunRequest, StartRunResponse, UpdateProjectRequest, UpdateProjectResponse } from "./monitoring_pb.js";
+import { CreateNewsRequest, CreateNewsResponse, CreateProjectRequest, CreateProjectResponse, DeleteProjectRequest, DeleteProjectResponse, GetProjectRequest, GetProjectResponse, GetRunRequest, GetRunResponse, ListNewsRequest, ListNewsResponse, ListProjectsRequest, ListProjectsResponse, ListRunsRequest, ListRunsResponse, StartRunRequest, StartRunResponse, UpdateNewsRequest, UpdateNewsResponse, UpdateProjectRequest, UpdateProjectResponse } from "./monitoring_pb.js";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -91,6 +91,46 @@ export const RunService = {
       name: "ListRuns",
       I: ListRunsRequest,
       O: ListRunsResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * Лента проекта: чтение с фильтрами, правка карточки, ручное добавление.
+ * Управления источниками здесь нет намеренно — это UpdateProject с
+ * update_mask: ["sources"] и новым массивом.
+ *
+ * @generated from service monitoring.v1.NewsService
+ */
+export const NewsService = {
+  typeName: "monitoring.v1.NewsService",
+  methods: {
+    /**
+     * @generated from rpc monitoring.v1.NewsService.ListNews
+     */
+    listNews: {
+      name: "ListNews",
+      I: ListNewsRequest,
+      O: ListNewsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * @generated from rpc monitoring.v1.NewsService.UpdateNews
+     */
+    updateNews: {
+      name: "UpdateNews",
+      I: UpdateNewsRequest,
+      O: UpdateNewsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * @generated from rpc monitoring.v1.NewsService.CreateNews
+     */
+    createNews: {
+      name: "CreateNews",
+      I: CreateNewsRequest,
+      O: CreateNewsResponse,
       kind: MethodKind.Unary,
     },
   }
