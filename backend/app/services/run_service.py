@@ -44,7 +44,9 @@ class RunService:
             )
         )
 
-        self.tasks.create_extract_tasks(run.id, project.id, sources)
+        self.tasks.create_extract_tasks(
+            run.id, project.id, sources, collection_days=project.collection_days or 7
+        )
         return run, None
 
     @staticmethod

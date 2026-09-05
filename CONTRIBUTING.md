@@ -8,13 +8,13 @@
 
 | Инструмент | Проверка | Установка (Ubuntu) |
 |------------|----------|-------------------|
-| Python 3.8+ | `python3 --version` | `sudo apt install python3 python3-venv` |
-| pip | `python3 -m pip --version` | `sudo apt install python3-pip` |
-| make | `make --version` | `sudo apt install make` |
-| buf | `buf --version` | см. ниже |
-| protoc | `protoc --version` | `sudo apt install protobuf-compiler` |
-| Node.js + npm | `node --version && npm --version` | `sudo apt install nodejs npm` |
+| Python 3.11+ | `python3 --version` | `sudo apt install python3 python3-venv` |
+| Docker + compose | `docker compose version` | [docs.docker.com](https://docs.docker.com/engine/install/) |
 | git | `git --version` | `sudo apt install git` |
+
+`protoc` и Node.js на хосте **не нужны**: `make generate` гоняет TypeScript-генерацию в
+контейнере `node:20-alpine`, Python-часть — в локальном `.venv` (создаётся `make venv`).
+`buf` нужен только для `make lint`/`buf breaking` — опционально (см. ниже).
 
 ### Установка buf
 
@@ -141,8 +141,15 @@ make down        # остановить
    ```bash
    make generate
    ```
-4. Обновите реализацию в `backend/app/` и `frontend/src/` в соответствии с новыми типами
-5. Закоммитьте только изменения в `*.proto` и ваш код (не сгенерированные файлы)
+4. `buf breaking --against '.git#branch=main'` — убедитесь, что изменения аддитивные
+5. Обновите реализацию в `backend/app/` и `frontend/src/` в соответствии с новыми типами
+6. Закоммитьте `.proto`, **сгенерированный код** (`backend/gen/`, `frontend/src/gen/`) и вашу
+   реализацию — вместе. Образ не соберётся без сгенерированного кода в репозитории.
+
+Контракт реально управляет обеими сторонами: бэкенд парсит запрос с
+`ignore_unknown_fields=False` (поле вне proto → `400 invalid_argument`), фронт типизирован
+сгенерированным клиентом (поле вне proto → ошибка `tsc`). Тест `backend/tests/test_contract.py`
+проверяет это как свойство.
 
 ### Все команды
 
@@ -172,24 +179,11 @@ rm -rf .venv
 make install
 ```
 
-### `protoc: command not found` при `make generate`
-
-Установите системный `protoc`:
-```bash
-sudo apt install protobuf-compiler
-```
-
 ### `make generate` падает на TypeScript генерации
 
-Проверьте что JS плагины установлены:
-```bash
-ls frontend/node_modules/.bin/protoc-gen-es
-```
-Если файла нет:
-```bash
-cd frontend
-npm install --save-dev @bufbuild/protoc-gen-es @connectrpc/protoc-gen-connect-es
-```
+TS-генерация идёт в контейнере `node:20-alpine` и берёт плагины из `frontend/node_modules/`.
+Если их там нет — сначала `make install` (ставит плагины через контейнер), затем `make generate`.
+Docker при этом обязан быть запущен.
 
 ### После `git pull` что-то не работает
 
@@ -209,12 +203,11 @@ make generate
 ## ✅ Чеклист перед коммитом
 
 - [ ] Я не правил(а) файлы в `backend/gen/` и `frontend/src/gen/` руками
-- [ ] Если менял(а) `.proto` — выполнил(а) `make generate` и закоммитил(а) результат
-- [ ] Я изменил(а) `proto`-файл, если менял(а) API
-- [ ] `make lint` проходит без ошибок
-- [ ] `make generate` работает без ошибок
+- [ ] Если менял(а) `.proto` — выполнил(а) `make generate` и закоммитил(а) результат **вместе** с `.proto`
+- [ ] `buf breaking` не ругается (изменения контракта аддитивные)
 - [ ] `make test` проходит без ошибок (юнит-тесты на чистой логике, без Docker-сети)
-- [ ] Мой код работает локально; для изменений в worker/API — `make smoke` зелёный
+- [ ] Для изменений в worker/API/ingestion — `make smoke` зелёный
+- [ ] `docker compose down -v && make up && make migrate` поднимает стек с нуля
 
 ---
 

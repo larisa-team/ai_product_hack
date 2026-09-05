@@ -7,4 +7,4 @@ from __future__ import annotations
 
 
 def register_all() -> None:
-    from app.api import project_api, run_api  # noqa: F401
+    from app.api import news_api, project_api, run_api  # noqa: F401

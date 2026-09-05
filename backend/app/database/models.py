@@ -21,6 +21,9 @@ class Project(Base):
     filters: Mapped[list] = mapped_column(JSONB, default=list)
     sources: Mapped[list] = mapped_column(JSONB, default=list)
 
+    # За сколько дней собирать при ПЕРВОМ сборе источника (дальше — инкрементальный курсор).
+    collection_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default="7", default=7)
+
     # Связь с запусками
     runs: Mapped[list["Run"]] = relationship("Run", back_populates="project", cascade="all, delete-orphan")
 

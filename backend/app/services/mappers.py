@@ -53,6 +53,7 @@ def project_to_pb(project: Project) -> pb.Project:
         topic=project.topic,
         filters=[filter_to_pb(f) for f in (project.filters or [])],
         sources=[source_to_pb(s) for s in (project.sources or [])],
+        collection_days=project.collection_days or 7,
         created_at=to_timestamp(project.created_at),
         updated_at=to_timestamp(project.updated_at),
     )
@@ -60,6 +61,19 @@ def project_to_pb(project: Project) -> pb.Project:
 
 def entities_to_pb(raw: dict[str, Any] | None) -> pb.NewsEntities:
     return json_format.ParseDict(raw or {}, pb.NewsEntities(), ignore_unknown_fields=True)
+
+
+def category_name(value: int) -> str:
+    """Число enum NewsCategory -> имя значения (в таком виде оно лежит в БД)."""
+    return pb.NewsCategory.Name(value)
+
+
+def importance_name(value: int) -> str:
+    return pb.NewsImportance.Name(value)
+
+
+def doc_type_name(value: int) -> str:
+    return pb.DocType.Name(value)
 
 
 def _enum_value(enum_type: Any, name: str | None) -> int:
