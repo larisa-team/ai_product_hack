@@ -16,6 +16,7 @@ class ProjectService:
         filters: list[dict],
         sources: list[dict],
         collection_days: int = 7,
+        profile: str = "",
     ) -> Project:
         project = Project(
             id=str(uuid.uuid4()),
@@ -24,6 +25,7 @@ class ProjectService:
             filters=filters,
             sources=sources,
             collection_days=collection_days,
+            profile=profile,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()
         )
@@ -43,6 +45,7 @@ class ProjectService:
         filters: list[dict] | None = None,
         sources: list[dict] | None = None,
         collection_days: int | None = None,
+        profile: str | None = None,
     ) -> Project | None:
         project = await self.repo.get_by_id(project_id)
         if not project:
@@ -58,6 +61,8 @@ class ProjectService:
             project.sources = sources
         if collection_days is not None:
             project.collection_days = collection_days
+        if profile is not None:
+            project.profile = profile
 
         project.updated_at = datetime.utcnow()
         

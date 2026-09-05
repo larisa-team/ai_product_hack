@@ -114,12 +114,19 @@ _FILTER_SYS = (
 _NEWS_SYS = (
     "Ты аналитик темы «{topic}». Тебе дан JSON-массив сообщений из СМИ, сайтов регуляторов "
     "и Telegram-каналов.\n"
+    "{profile_block}"
     "Сгруппируй сообщения, относящиеся к ОДНОМУ И ТОМУ ЖЕ событию, и для каждой группы составь "
     "одну новость: короткий конкретный заголовок и текст в 3–5 предложений по сути события.\n"
     "Для каждой группы также определи:\n"
     "  category — одно из: регуляторика | репутация | конкуренты | тренды;\n"
-    "  importance — одно из: high | medium | low (high — если есть риск штрафов, проверок, "
-    "суда, отзыва лицензии, кризис или вступающее в силу требование);\n"
+    "  importance — одно из: high | medium | low, по влиянию события на бизнес-заказчика:\n"
+    "    high — прямое и требующее реакции: новое или вступающее в силу требование НПА, "
+    "риск штрафов/проверок/суда/отзыва лицензии, репутационный кризис, крупный ход прямого "
+    "конкурента (сделка, слияние, уход игрока), изменение на ключевом для бизнеса рынке;\n"
+    "    medium — косвенное или отложенное: законопроект/инициатива на ранней стадии, "
+    "отраслевой тренд, ход небольшого игрока или в смежном сегменте, событие, которое "
+    "затронет бизнес не сразу;\n"
+    "    low — фоновая информация: знать полезно, но реакции не требует;\n"
     "  doc_type — npa для нормативно-правового акта, news для новостной статьи;\n"
     "  entities — кто (who), что (what), когда (when), последствия (consequences); "
     "если чего-то в тексте нет, оставь пустую строку, не выдумывай.\n"
@@ -157,8 +164,16 @@ class OpenAICompatProvider:
                 flags[i] = bool(row.get("relevant"))
         return flags
 
-    async def make_news(self, topic: str, messages: list[dict]) -> list[NewsGroup]:
-        system = _NEWS_SYS.format(topic=topic)
+    async def make_news(
+        self, topic: str, messages: list[dict], profile: str = ""
+    ) -> list[NewsGroup]:
+        profile_block = (
+            f"Профиль бизнеса-заказчика мониторинга: {profile.strip()}\n"
+            "Важность события оценивай по влиянию именно на этот бизнес.\n"
+            if profile.strip()
+            else ""
+        )
+        system = _NEWS_SYS.format(topic=topic, profile_block=profile_block)
         user = json.dumps(messages, ensure_ascii=False)
         data = await self._complete_json(system, user, json_schema=_NEWS_SCHEMA)
         out: list[NewsGroup] = []

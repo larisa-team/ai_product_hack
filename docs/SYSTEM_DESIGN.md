@@ -129,8 +129,10 @@ CREATE TABLE projects (
   updated_at TIMESTAMP NOT NULL,
   filters JSONB NOT NULL DEFAULT '[]',   -- список monitoring.v1.ProjectFilter в proto3-JSON
   sources JSONB NOT NULL DEFAULT '[]',   -- список monitoring.v1.Source в proto3-JSON
-  collection_days INTEGER NOT NULL DEFAULT 7  -- глубина ПЕРВОГО сбора источника (дальше — курсор);
+  collection_days INTEGER NOT NULL DEFAULT 7, -- глубина ПЕРВОГО сбора источника (дальше — курсор);
                                              -- 0 трактуется как 7, диапазон 1..60
+  profile TEXT NOT NULL DEFAULT ''            -- профиль бизнеса-заказчика; уходит в промпт
+                                             -- саммаризации, важность считается по влиянию на него
 );
 
 CREATE TABLE runs (
@@ -393,8 +395,11 @@ schema: {"results":[{"i":int,"relevant":bool}]}
 
 ```
 system: Сгруппируй сообщения об одном и том же событии и сделай из каждой группы новость.
-        Тема мониторинга: «{topic}». Заголовок — короткий, content — 3–5 предложений по сути.
+        Тема мониторинга: «{topic}». [Профиль бизнеса-заказчика: «{profile}» — если задан.]
+        Заголовок — короткий, content — 3–5 предложений по сути.
         Плюс для каждой группы: категория, важность, тип документа и сущности. Только JSON.
+        importance: high — прямое влияние на бизнес (НПА, штрафы/суд, кризис, ход прямого
+        конкурента); medium — косвенное/отложенное; low — фон. Оценивается по влиянию на профиль.
 user:   [{"i":0,"source":"...","text":"..."}, ...]
 schema: {"news":[{"title":str, "content":str, "message_indices":[int],
                   "category":"регуляторика|репутация|конкуренты|тренды",
@@ -413,6 +418,13 @@ schema: {"news":[{"title":str, "content":str, "message_indices":[int],
 возвращала результат лишь по 1–2 сообщениям. Режем вход на `NEWSMAKER_BATCH` (12), индексы внутри
 батча сдвигаем обратно в общий список. Замер на 6 каналах: было `relevant 28 → news 1`, стало
 `relevant 29 → news 27`.
+
+**Важность — относительно бизнеса-заказчика.** `Project.profile` (свободный текст: чем
+занимается компания, ключевые риски) уходит в системный промпт `make_news`; `importance`
+оценивается по влиянию события на этот бизнес, а не по абстрактной значимости. Профиль пуст →
+оценка по общей значимости для темы (прод-путь так и работает, пока поле не заполнено). На
+размеченном датасете (`app/eval/enrichment.py`) профиль + явная рубрика high/medium/low подняли
+accuracy важности ~0.63 → ~0.78.
 
 **Перевод значений LLM в enum'ы контракта** — в одном месте (`app/llm/schema.py`), чтобы
 провайдеры говорили на языке предметной области (русские названия категорий, как в чек-листе), а
@@ -731,6 +743,23 @@ message RunStats {
 LLM-вызов легко идёт >15с → `/api/health` врал `worker: false` весь compose. Теперь пульс —
 отдельная фоновая задача (`_heartbeat`, раз в `HEARTBEAT_INTERVAL`=5с, TTL 20с), не зависит
 от того, какую задачу воркер крутит.
+
+**Заход 4 — профиль бизнеса-заказчика для оценки важности** ✅
+
+```proto
+message Project {
+  ...
+  string profile = 9;   // NEW — чем занимается бизнес, ключевые риски; уходит в промпт
+                          //   саммаризации, importance оценивается по влиянию на этот бизнес
+}
+message CreateProjectRequest { ...  string profile = 6; }   // NEW
+message UpdateProjectRequest { ...  string profile = 8; }   // NEW (в UPDATABLE)
+```
+
+Поле provider-метода, а не только контракта: `LLMProvider.make_news(topic, messages, profile="")`.
+Прод (`handle_compose`) передаёт `project.profile`; пусто → промпт без блока профиля, поведение
+как раньше. Плюс в `_NEWS_SYS` добавлена полная рубрика importance (было определено только
+`high`). Измерено на `app/eval/enrichment.py`: importance ~0.63 → ~0.78, category ~0.87 → ~0.90.
 
 ### Подводные камни proto3 (найденные в этом проекте)
 

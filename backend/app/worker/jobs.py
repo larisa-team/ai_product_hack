@@ -271,7 +271,9 @@ async def handle_compose(task: Task) -> None:
                 payload_msgs = [
                     {"i": i, "source": m.source_key, "text": m.text} for i, m in enumerate(batch)
                 ]
-                for g in await provider.make_news(project.topic, payload_msgs):
+                for g in await provider.make_news(
+                    project.topic, payload_msgs, project.profile or ""
+                ):
                     # индексы внутри батча -> позиции в capped
                     groups.append({**g, "message_indices": [offset + i for i in g["message_indices"]]})
                 run.stats = {**run.stats, "stage_done": offset // settings.NEWSMAKER_BATCH + 1}

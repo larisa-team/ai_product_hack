@@ -353,6 +353,15 @@ export class Project extends Message<Project> {
    */
   collectionDays = 0;
 
+  /**
+   * Профиль бизнеса-заказчика мониторинга (чем занимается, ключевые риски). Уходит
+   * в промпт саммаризации: важность события оценивается по влиянию именно на этот
+   * бизнес. Пусто — оценивать по общей значимости для темы.
+   *
+   * @generated from field: string profile = 9;
+   */
+  profile = "";
+
   constructor(data?: PartialMessage<Project>) {
     super();
     proto3.util.initPartial(data, this);
@@ -369,6 +378,7 @@ export class Project extends Message<Project> {
     { no: 6, name: "created_at", kind: "message", T: Timestamp },
     { no: 7, name: "updated_at", kind: "message", T: Timestamp },
     { no: 8, name: "collection_days", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
+    { no: 9, name: "profile", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Project {
@@ -417,6 +427,11 @@ export class CreateProjectRequest extends Message<CreateProjectRequest> {
    */
   collectionDays = 0;
 
+  /**
+   * @generated from field: string profile = 6;
+   */
+  profile = "";
+
   constructor(data?: PartialMessage<CreateProjectRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -430,6 +445,7 @@ export class CreateProjectRequest extends Message<CreateProjectRequest> {
     { no: 3, name: "filters", kind: "message", T: ProjectFilter, repeated: true },
     { no: 4, name: "sources", kind: "message", T: Source, repeated: true },
     { no: 5, name: "collection_days", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
+    { no: 6, name: "profile", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CreateProjectRequest {
@@ -753,6 +769,11 @@ export class UpdateProjectRequest extends Message<UpdateProjectRequest> {
    */
   collectionDays = 0;
 
+  /**
+   * @generated from field: string profile = 8;
+   */
+  profile = "";
+
   constructor(data?: PartialMessage<UpdateProjectRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -768,6 +789,7 @@ export class UpdateProjectRequest extends Message<UpdateProjectRequest> {
     { no: 5, name: "sources", kind: "message", T: Source, repeated: true },
     { no: 6, name: "update_mask", kind: "message", T: FieldMask },
     { no: 7, name: "collection_days", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
+    { no: 8, name: "profile", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): UpdateProjectRequest {

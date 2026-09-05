@@ -76,6 +76,7 @@ def test_project_to_pb_shape():
         filters=[{"prompt": "не интересны вакансии"}],
         sources=[{"type": "SOURCE_TYPE_TELEGRAM", "telegram": "cit_gov"}],
         collection_days=15,
+        profile="вендор корпоративного ПО",
         created_at=datetime(2026, 9, 4, 10, 0, 0),
         updated_at=datetime(2026, 9, 4, 10, 0, 0),
     )
@@ -83,6 +84,7 @@ def test_project_to_pb_shape():
     assert isinstance(out, pb.Project)
     assert out.id == "p1"
     assert out.collection_days == 15
+    assert out.profile == "вендор корпоративного ПО"
     assert len(out.filters) == 1 and out.filters[0].prompt == "не интересны вакансии"
     assert len(out.sources) == 1 and out.sources[0].telegram == "cit_gov"
 
@@ -91,6 +93,7 @@ def test_project_to_pb_collection_days_defaults_to_7():
     project = SimpleNamespace(
         id="p1", name="x", topic="y", filters=[], sources=[],
         collection_days=0,  # старый проект / не задано
+        profile="",
         created_at=datetime(2026, 9, 4), updated_at=datetime(2026, 9, 4),
     )
     assert mappers.project_to_pb(project).collection_days == 7

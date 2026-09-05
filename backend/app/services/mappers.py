@@ -54,6 +54,7 @@ def project_to_pb(project: Project) -> pb.Project:
         filters=[filter_to_pb(f) for f in (project.filters or [])],
         sources=[source_to_pb(s) for s in (project.sources or [])],
         collection_days=project.collection_days or 7,
+        profile=project.profile or "",
         created_at=to_timestamp(project.created_at),
         updated_at=to_timestamp(project.updated_at),
     )
