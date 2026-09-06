@@ -128,6 +128,11 @@ async def unary(
             "internal",
             f"{service_fqn}/{method} вернул {type(resp).__name__}, ожидался {rpc.response.__name__}",
         )
+    # Коммитим ДО отправки ответа: exit-код yield-зависимости FastAPI выполняется
+    # после отдачи ответа клиенту, поэтому commit там означал бы, что клиент (и воркер)
+    # видят «успех» до того, как запись легла в БД — StartRun сразу после CreateProject
+    # ловил 404, а extract вставлял messages с ещё не закоммиченным project_id (FK).
+    await db.commit()
     return JSONResponse(json_format.MessageToDict(resp))
 
 

@@ -72,28 +72,37 @@ async def handle_extract(task: Task) -> None:
         await TaskRepository(db).mark_done(task.id)
         await db.commit()
 
-    async with async_session() as db:
-        repo = MessageRepository(db)
+    fetched = inserted = 0
+    try:
+        async with async_session() as db:
+            repo = MessageRepository(db)
+            if source_type == RSS:
+                fetched, inserted = await _extract_rss(
+                    repo, project_id, run_id, source_key, job_id, collection_days
+                )
+            else:
+                fetched, inserted = await _extract_telegram(
+                    repo, project_id, run_id, source_key, job_id, collection_days
+                )
+            await db.commit()
+    except Exception:
+        # Сбой сбора одного источника (недоступная лента, гонка FK и т.п.) не должен
+        # оставлять прогон висеть навсегда — compose всё равно ставим ниже.
+        log.exception("extract %s: сбор источника упал", job_id)
 
-        if source_type == RSS:
-            fetched, inserted = await _extract_rss(
-                repo, project_id, run_id, source_key, job_id, collection_days
-            )
-        else:
-            fetched, inserted = await _extract_telegram(
-                repo, project_id, run_id, source_key, job_id, collection_days
-            )
+    # Отдельной транзакцией и в любом случае: этот extract завершён (задача done ещё
+    # выше), и если он был последним — пора ставить compose. enqueue_compose_if_ready
+    # сам проверит, что pending extract-задач не осталось.
+    try:
+        async with async_session() as db:
+            await TaskRepository(db).enqueue_compose_if_ready(run_id)
+            await db.commit()
+    except Exception:
+        log.exception("extract %s: не удалось поставить compose", job_id)
 
-        task_repo = TaskRepository(db)
-        remaining = await task_repo.count_pending(run_id, "extract")
-        if remaining <= 0:
-            await task_repo.enqueue_compose_if_ready(run_id)
-
-        await db.commit()
-        log.info(
-            "extract %s [%s]: fetched=%d inserted=%d, осталось extract-задач %d",
-            job_id, source_type, fetched, inserted, remaining,
-        )
+    log.info(
+        "extract %s [%s]: fetched=%d inserted=%d", job_id, source_type, fetched, inserted
+    )
 
 
 async def _extract_telegram(
@@ -316,10 +325,13 @@ async def handle_compose(task: Task) -> None:
                 n_news,
             )
         except Exception as exc:
-            log.exception("compose %s: ошибка", run_id)
             await db.rollback()
             run = await db.get(Run, run_id)
-            if run is not None:
-                run.state = FAILED
-                run.stats = {"collected": len(msgs), "error": str(exc)[:500]}
-                await db.commit()
+            if run is None:
+                # Проект удалили во время обработки — прогона больше нет, это не авария.
+                log.info("compose %s: прогон исчез во время обработки (проект удалён)", run_id)
+                return
+            log.exception("compose %s: ошибка", run_id)
+            run.state = FAILED
+            run.stats = {"collected": len(msgs), "error": str(exc)[:500]}
+            await db.commit()

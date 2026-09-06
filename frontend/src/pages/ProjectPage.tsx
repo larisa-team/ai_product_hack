@@ -7,6 +7,7 @@ import {
   Group,
   Loader,
   Modal,
+  Progress,
   Select,
   Stack,
   Text,
@@ -19,6 +20,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import {
   DocType,
+  getHealth,
   News,
   NewsCategory,
   NewsImportance,
@@ -35,13 +37,25 @@ import NewsCard, {
 } from "../components/NewsCard";
 import SourceManager from "../components/SourceManager";
 
-const STUCK_AFTER_MS = 90_000;
+const PERIOD_OPTIONS = [
+  { value: "1", label: "Сутки" },
+  { value: "7", label: "7 дней" },
+  { value: "15", label: "15 дней" },
+  { value: "30", label: "30 дней" },
+];
 
 const STATE_LABEL: Record<number, string> = {
   [RunState.UNSPECIFIED]: "ещё не запускался",
   [RunState.STARTED]: "идёт обработка",
   [RunState.DONE]: "лента обновлена",
   [RunState.FAILED]: "ошибка обработки",
+};
+
+const STAGE_LABEL: Record<string, string> = {
+  "": "Собираю материалы из источников",
+  collecting: "Собираю материалы из источников",
+  filtering: "Отсеиваю нерелевантное",
+  composing: "Составляю и саммаризирую новости",
 };
 
 const CATEGORY_OPTIONS = Object.entries(CATEGORY_LABEL)
@@ -90,6 +104,8 @@ export default function ProjectPage() {
 
   const [editName, setEditName] = useState("");
   const [editTopic, setEditTopic] = useState("");
+  const [editProfile, setEditProfile] = useState("");
+  const [editPeriod, setEditPeriod] = useState("7");
   const [editFilters, setEditFilters] = useState("");
 
   const [newsTitle, setNewsTitle] = useState("");
@@ -104,6 +120,13 @@ export default function ProjectPage() {
     queryKey: ["project", id],
     queryFn: async () => (await projectClient.getProject({ id })).project!,
     enabled: !!id,
+  });
+
+  const health = useQuery({
+    queryKey: ["health"],
+    queryFn: getHealth,
+    refetchInterval: 15_000,
+    retry: false,
   });
 
   const runs = useQuery({
@@ -127,6 +150,8 @@ export default function ProjectPage() {
     if (!project.data) return;
     setEditName(project.data.name);
     setEditTopic(project.data.topic);
+    setEditProfile(project.data.profile);
+    setEditPeriod(String(project.data.collectionDays || 7));
     setEditFilters(project.data.filters.map((filter) => filter.prompt).join("\n"));
   }, [project.data]);
 
@@ -153,8 +178,8 @@ export default function ProjectPage() {
       categories: category ? [Number(category) as NewsCategory] : [],
       importances: importance ? [Number(importance) as NewsImportance] : [],
       source: source || "",
-      from: optionalTimestamp(dateFrom),
-      to: optionalTimestamp(dateTo, true),
+      publishedFrom: optionalTimestamp(dateFrom),
+      publishedTo: optionalTimestamp(dateTo, true),
       q: query.trim(),
       includeHidden,
       pageSize: 100,
@@ -184,8 +209,10 @@ export default function ProjectPage() {
       id,
       name: editName.trim(),
       topic: editTopic.trim(),
+      profile: editProfile.trim(),
+      collectionDays: Number(editPeriod),
       filters: editFilters.split("\n").map((prompt) => prompt.trim()).filter(Boolean).map((prompt) => ({ prompt })),
-      updateMask: { paths: ["name", "topic", "filters"] },
+      updateMask: { paths: ["name", "topic", "profile", "collection_days", "filters"] },
     }),
     onSuccess: () => {
       setSettingsOpened(false);
@@ -269,7 +296,15 @@ export default function ProjectPage() {
   const currentRun = run.data;
   const stats = currentRun?.stats;
   const discarded = Math.max(0, (stats?.collected || 0) - (stats?.relevant || 0));
-  const isStuck = !!currentRun && currentRun.state === RunState.STARTED && !!currentRun.createdAt && Date.now() - currentRun.createdAt.toDate().getTime() > STUCK_AFTER_MS;
+
+  const running = currentRun?.state === RunState.STARTED;
+  const stage = stats?.stage ?? "";
+  const stageDone = stats?.stageDone ?? 0;
+  const stageTotal = stats?.stageTotal ?? 0;
+  const pct = stageTotal > 0 ? Math.min(100, Math.round((stageDone / stageTotal) * 100)) : null;
+  // Показываем только когда запуска нет: во время прогона /api/health периодически
+  // моргает worker:false (нагрузка, дрейф часов WSL), а прогресс-бар и так виден.
+  const workerDown = health.data ? !health.data.worker && !running : false;
   const sourceOptions = project.data?.sources.map((item) => ({
     value: item.type === SourceType.RSS ? item.rssUrl : item.telegram,
     label: sourceTitle(item),
@@ -321,9 +356,21 @@ export default function ProjectPage() {
       </section>
 
       {start.isError && <Alert color="red" mb="md">{(start.error as Error).message}</Alert>}
-      {isStuck && (
-        <Alert color="yellow" title="Обработка идёт необычно долго" mb="md">
-          Возможно, воркер недоступен. Можно повторить запуск или проверить worker в <code>/api/health</code>.
+
+      {workerDown && (
+        <Alert color="orange" title="Обработчик недоступен" mb="md">
+          Сервис <code>worker</code> не отвечает — новые запуски не обрабатываются.
+          Поднимите его: <code>docker compose up -d</code>.
+        </Alert>
+      )}
+
+      {running && (
+        <Alert color="blue" variant="light" mb="md" icon={<Loader size="xs" />}>
+          <Group justify="space-between" wrap="nowrap" mb={pct !== null ? 6 : 0}>
+            <Text size="sm">{STAGE_LABEL[stage] ?? "Обработка…"}</Text>
+            {stageTotal > 0 && <Text size="sm" c="dimmed">{stageDone} / {stageTotal}</Text>}
+          </Group>
+          {pct !== null && <Progress value={pct} animated size="sm" />}
         </Alert>
       )}
 
@@ -412,6 +459,23 @@ export default function ProjectPage() {
         <Stack gap="md">
           <TextInput label="Название" value={editName} onChange={(event) => setEditName(event.currentTarget.value)} />
           <Textarea label="Тема мониторинга" autosize minRows={2} value={editTopic} onChange={(event) => setEditTopic(event.currentTarget.value)} />
+          <Textarea
+            label="Профиль бизнеса"
+            description="Важность новостей оценивается по влиянию на этот бизнес. Пусто — по общей значимости."
+            autosize
+            minRows={2}
+            value={editProfile}
+            onChange={(event) => setEditProfile(event.currentTarget.value)}
+          />
+          <Select
+            label="Период первичного сбора"
+            description="Применяется к новым источникам при первом сборе."
+            data={PERIOD_OPTIONS}
+            value={editPeriod}
+            onChange={(value) => setEditPeriod(value ?? "7")}
+            allowDeselect={false}
+            w={220}
+          />
           <Textarea label="Что исключать" description="Одно указание в строке" autosize minRows={3} value={editFilters} onChange={(event) => setEditFilters(event.currentTarget.value)} />
           {saveSettings.isError && <Alert color="red">{(saveSettings.error as Error).message}</Alert>}
           <Group justify="flex-end"><Button variant="default" onClick={() => setSettingsOpened(false)}>Отмена</Button><Button color="dark" disabled={!editName.trim() || !editTopic.trim()} loading={saveSettings.isPending} onClick={() => saveSettings.mutate()}>Сохранить</Button></Group>

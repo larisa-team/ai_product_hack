@@ -9,10 +9,12 @@ async_session = async_sessionmaker(
 
 
 async def get_db() -> AsyncSession:
+    """Сессия на запрос. Коммит делает сам обработчик (connect.unary) ДО отдачи
+    ответа — здесь только откат на исключении и закрытие. Раньше commit был после
+    yield, а FastAPI выполняет exit-код yield-зависимости уже после отправки ответа."""
     async with async_session() as session:
         try:
             yield session
-            await session.commit()
         except Exception:
             await session.rollback()
             raise
