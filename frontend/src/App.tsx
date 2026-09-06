@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 
-import { getHealth } from "./api/client";
+import { getHealth, isDemoMode } from "./api/client";
 import ProjectPage from "./pages/ProjectPage";
 import ProjectsPage from "./pages/ProjectsPage";
 import RunsPage from "./pages/RunsPage";
@@ -30,7 +30,9 @@ export default function App() {
           </Link>
           <nav className="topbar-nav" aria-label="Основная навигация">
             <NavLink to="/" end>Проекты</NavLink>
-            <a href="/api/health" target="_blank" rel="noreferrer">Статус API</a>
+            {isDemoMode
+              ? <span className="demo-mode-badge" title="Данные обрабатываются встроенным mock-провайдером">DEMO · MOCK</span>
+              : <a href="/api/health" target="_blank" rel="noreferrer">Статус API</a>}
           </nav>
           <div className="system-pill" title="Статус backend, базы и воркера">
             <span

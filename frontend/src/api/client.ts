@@ -6,13 +6,21 @@ import {
   ProjectService,
   RunService,
 } from "../gen/monitoring/v1/monitoring_connect";
+import { createDemoClients } from "./demo";
 
 // baseUrl + имя сервиса из proto -> POST /api/monitoring.v1.ProjectService/CreateProject
 const transport = createConnectTransport({ baseUrl: "/api" });
 
-export const projectClient = createPromiseClient(ProjectService, transport);
-export const runClient = createPromiseClient(RunService, transport);
-export const newsClient = createPromiseClient(NewsService, transport);
+const liveProjectClient = createPromiseClient(ProjectService, transport);
+const liveRunClient = createPromiseClient(RunService, transport);
+const liveNewsClient = createPromiseClient(NewsService, transport);
+
+export const isDemoMode = import.meta.env.VITE_DEMO_MODE === "true";
+const demoClients = createDemoClients();
+
+export const projectClient = (isDemoMode ? demoClients.projectClient : liveProjectClient) as typeof liveProjectClient;
+export const runClient = (isDemoMode ? demoClients.runClient : liveRunClient) as typeof liveRunClient;
+export const newsClient = (isDemoMode ? demoClients.newsClient : liveNewsClient) as typeof liveNewsClient;
 
 export type HealthStatus = {
   status: "ok" | "degraded";
@@ -23,6 +31,9 @@ export type HealthStatus = {
 };
 
 export async function getHealth(): Promise<HealthStatus> {
+  if (isDemoMode) {
+    return { status: "ok", db: true, redis: true, worker: true, llm_provider: "mock" };
+  }
   const response = await fetch("/api/health");
   if (!response.ok) throw new Error("Сервис недоступен");
   return response.json() as Promise<HealthStatus>;

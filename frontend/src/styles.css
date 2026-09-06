@@ -1,7 +1,9 @@
 :root {
   color: #111111;
   background: #f2f2f0;
-  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  --font-sans: Arial, Helvetica, sans-serif;
+  --font-mono: Consolas, "Courier New", monospace;
+  font-family: var(--font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -99,6 +101,19 @@ a {
 .topbar-nav a:hover,
 .topbar-nav a[aria-current="page"] {
   color: #111111;
+}
+
+.demo-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 11px;
+  border: 1px solid rgba(125, 105, 238, 0.35);
+  border-radius: 999px;
+  background: rgba(125, 105, 238, 0.11);
+  color: #5f4ed0;
+  font: 700 0.72rem/1 var(--font-mono);
+  letter-spacing: 0.08em;
 }
 
 .system-pill {
