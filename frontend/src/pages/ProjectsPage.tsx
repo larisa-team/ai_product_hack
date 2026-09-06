@@ -29,6 +29,14 @@ const EMPTY_SOURCE: DraftSource = {
   label: "",
 };
 
+// Project.collectionDays — глубина первого сбора источника. Только пресеты.
+const PERIOD_OPTIONS = [
+  { value: "1", label: "Сутки" },
+  { value: "7", label: "7 дней" },
+  { value: "15", label: "15 дней" },
+  { value: "30", label: "30 дней" },
+];
+
 const lines = (value: string) =>
   value
     .split("\n")
@@ -46,6 +54,8 @@ export default function ProjectsPage() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
+  const [profile, setProfile] = useState("");
+  const [period, setPeriod] = useState("7");
   const [filters, setFilters] = useState("");
   const [sources, setSources] = useState<DraftSource[]>([{ ...EMPTY_SOURCE }]);
 
@@ -64,6 +74,8 @@ export default function ProjectsPage() {
       const response = await projectClient.createProject({
         name: name.trim(),
         topic: topic.trim(),
+        profile: profile.trim(),
+        collectionDays: Number(period),
         filters: lines(filters).map((prompt) => ({ prompt })),
         sources: validSources.map((source) => ({
           type: source.type,
@@ -206,6 +218,15 @@ export default function ProjectsPage() {
             <TextInput label="Название" placeholder="Мониторинг рынка ИТ" value={name} onChange={(event) => setName(event.currentTarget.value)} />
             <TextInput label="Тема" placeholder="Цифровые технологии, гранты" value={topic} onChange={(event) => setTopic(event.currentTarget.value)} />
           </div>
+          <Textarea
+            label="Профиль бизнеса"
+            description="Чем занимается компания и её ключевые риски. Важность новостей LLM оценивает по влиянию именно на этот бизнес. Необязательно."
+            placeholder="Российский вендор корпоративного ПО и облачных сервисов. Риски: импортозамещение, репутация, ходы конкурентов на рынке облаков."
+            minRows={2}
+            autosize
+            value={profile}
+            onChange={(event) => setProfile(event.currentTarget.value)}
+          />
           <Textarea label="Что исключать" description="Одно указание в строке" placeholder={"Не интересны вакансии\nИсключать поздравления"} minRows={2} autosize value={filters} onChange={(event) => setFilters(event.currentTarget.value)} />
           <div>
             <Group justify="space-between" mb="xs">
@@ -221,6 +242,15 @@ export default function ProjectsPage() {
               </div>
             ))}
           </div>
+          <Select
+            label="Период первичного сбора"
+            description="За сколько дней собрать материалы при первом запуске. Дальше собирается только новое."
+            data={PERIOD_OPTIONS}
+            value={period}
+            onChange={(value) => setPeriod(value ?? "7")}
+            allowDeselect={false}
+            w={220}
+          />
           {create.isError && <Alert color="red">{(create.error as Error).message}</Alert>}
           <Group justify="flex-end">
             <Button variant="default" onClick={() => setCreateOpened(false)}>Отмена</Button>
