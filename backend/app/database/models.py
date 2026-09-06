@@ -21,6 +21,13 @@ class Project(Base):
     filters: Mapped[list] = mapped_column(JSONB, default=list)
     sources: Mapped[list] = mapped_column(JSONB, default=list)
 
+    # За сколько дней собирать при ПЕРВОМ сборе источника (дальше — инкрементальный курсор).
+    collection_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default="7", default=7)
+
+    # Профиль бизнеса-заказчика: уходит в промпт саммаризации, важность события
+    # оценивается по влиянию именно на этот бизнес. Пусто — по общей значимости.
+    profile: Mapped[str] = mapped_column(String, nullable=False, server_default="", default="")
+
     # Связь с запусками
     runs: Mapped[list["Run"]] = relationship("Run", back_populates="project", cascade="all, delete-orphan")
 

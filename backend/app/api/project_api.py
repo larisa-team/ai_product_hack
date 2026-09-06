@@ -11,7 +11,21 @@ from app.services.project_service import ProjectService
 SERVICE = "monitoring.v1.ProjectService"
 
 # Поля, которые UpdateProject умеет менять. Пустая маска = менять всё перечисленное.
-UPDATABLE = ("name", "topic", "filters", "sources")
+UPDATABLE = ("name", "topic", "filters", "sources", "collection_days", "profile")
+
+_DAYS_MIN, _DAYS_MAX, _DAYS_DEFAULT = 1, 60, 7
+_PROFILE_MAX = 2000
+
+
+def _clamp_days(value: int) -> int:
+    """Период сбора в разумных границах. 0/пусто -> дефолт."""
+    if not value:
+        return _DAYS_DEFAULT
+    return max(_DAYS_MIN, min(_DAYS_MAX, value))
+
+
+def _clean_profile(value: str) -> str:
+    return value.strip()[:_PROFILE_MAX]
 
 
 async def create_project(req: pb.CreateProjectRequest, db: AsyncSession) -> pb.CreateProjectResponse:
@@ -25,6 +39,8 @@ async def create_project(req: pb.CreateProjectRequest, db: AsyncSession) -> pb.C
         topic=req.topic,
         filters=mappers.filters_to_json(list(req.filters)),
         sources=mappers.sources_to_json(list(req.sources)),
+        collection_days=_clamp_days(req.collection_days),
+        profile=_clean_profile(req.profile),
     )
     return pb.CreateProjectResponse(project=mappers.project_to_pb(project))
 
@@ -57,6 +73,8 @@ async def update_project(req: pb.UpdateProjectRequest, db: AsyncSession) -> pb.U
         topic=req.topic if "topic" in paths else None,
         filters=mappers.filters_to_json(list(req.filters)) if "filters" in paths else None,
         sources=mappers.sources_to_json(list(req.sources)) if "sources" in paths else None,
+        collection_days=_clamp_days(req.collection_days) if "collection_days" in paths else None,
+        profile=_clean_profile(req.profile) if "profile" in paths else None,
     )
     if project is None:
         raise ConnectError("not_found", f"проект {req.id} не найден")

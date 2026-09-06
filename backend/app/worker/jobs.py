@@ -19,6 +19,10 @@ from app.llm.provider import get_provider
 from app.queue import CLAIM_TTL_COMPOSE, CLAIM_TTL_EXTRACT, claim
 from app.services.run_service import DONE, FAILED
 
+
+def _n_batches(total: int, size: int) -> int:
+    return -(-total // size) if total else 0
+
 log = logging.getLogger(__name__)
 
 _MIN_DT = datetime.min
@@ -54,6 +58,7 @@ async def handle_extract(task: Task) -> None:
     project_id = task.payload["project_id"]
     source_key = task.payload["source_key"]
     source_type = task.payload.get("source_type", TELEGRAM)
+    collection_days = task.payload.get("collection_days", settings.TG_FETCH_DAYS)
     job_id = f"{run_id}:{source_key}"
 
     if not await claim(job_id, ttl=CLAIM_TTL_EXTRACT):
@@ -71,9 +76,13 @@ async def handle_extract(task: Task) -> None:
         repo = MessageRepository(db)
 
         if source_type == RSS:
-            fetched, inserted = await _extract_rss(repo, project_id, run_id, source_key, job_id)
+            fetched, inserted = await _extract_rss(
+                repo, project_id, run_id, source_key, job_id, collection_days
+            )
         else:
-            fetched, inserted = await _extract_telegram(repo, project_id, run_id, source_key, job_id)
+            fetched, inserted = await _extract_telegram(
+                repo, project_id, run_id, source_key, job_id, collection_days
+            )
 
         task_repo = TaskRepository(db)
         remaining = await task_repo.count_pending(run_id, "extract")
@@ -88,16 +97,19 @@ async def handle_extract(task: Task) -> None:
 
 
 async def _extract_telegram(
-    repo: MessageRepository, project_id: str, run_id: str, channel: str, job_id: str
+    repo: MessageRepository, project_id: str, run_id: str, channel: str, job_id: str,
+    collection_days: int,
 ) -> tuple[int, int]:
     """Telegram: курсор — сквозной номер сообщения."""
     cursor = await repo.get_cursor(project_id, channel)
+    # Период проекта применяется только к первому сбору источника; дальше рулит курсор.
+    days = collection_days if cursor is None else settings.TG_FETCH_DAYS
     try:
         msgs = await tg_fetch(
             channel,
             since_msg_id=cursor,
             limit=settings.TG_FETCH_LIMIT,
-            days=settings.TG_FETCH_DAYS,
+            days=days,
         )
     except NoPreviewError as exc:
         # Часть каналов отключает веб-превью — это не авария всего прогона.
@@ -130,19 +142,21 @@ async def _extract_telegram(
 
 
 async def _extract_rss(
-    repo: MessageRepository, project_id: str, run_id: str, feed_url: str, job_id: str
+    repo: MessageRepository, project_id: str, run_id: str, feed_url: str, job_id: str,
+    collection_days: int,
 ) -> tuple[int, int]:
     """RSS: курсор — дата публикации, сквозных номеров у записей нет."""
     cursor = await repo.get_cursor_published_at(project_id, feed_url)
     # Курсор лежит в БД без таймзоны, а записи ленты приходят в UTC — сравнивать
     # naive и aware datetime нельзя, поэтому приводим курсор к UTC.
     since = cursor.replace(tzinfo=timezone.utc) if cursor is not None else None
+    days = collection_days if cursor is None else settings.RSS_FETCH_DAYS
     try:
         entries = await rss_fetch(
             feed_url,
             since=since,
             limit=settings.RSS_FETCH_LIMIT,
-            days=settings.RSS_FETCH_DAYS,
+            days=days,
         )
     except RssFetchError as exc:
         log.warning("extract %s: %s", job_id, exc)
@@ -206,14 +220,25 @@ async def handle_compose(task: Task) -> None:
 
             # --- message-filter ---
             # Ставим relevant прямо на загруженных объектах: bulk-UPDATE оставил бы
-            # их в сессии устаревшими.
-            for batch in _chunks(msgs, settings.FILTER_BATCH):
+            # их в сессии устаревшими. Прогресс пишем после каждого батча —
+            # фронт поллит GetRun и рисует полосу; заодно продлеваем heartbeat
+            # (иначе на длинном compose /api/health покажет worker: false).
+            n_filter = _n_batches(len(msgs), settings.FILTER_BATCH)
+            run.stats = {
+                "collected": len(msgs),
+                "stage": "filtering",
+                "stage_done": 0,
+                "stage_total": n_filter,
+            }
+            await db.commit()
+            for i, batch in enumerate(_chunks(msgs, settings.FILTER_BATCH)):
                 flags = await provider.filter_relevance(
                     project.topic, extra, [m.text for m in batch]
                 )
                 for message, ok in zip(batch, flags):
                     message.relevant = bool(ok)
-            await db.flush()
+                run.stats = {**run.stats, "stage_done": i + 1}
+                await db.commit()
 
             relevant = [m for m in msgs if m.relevant]
 
@@ -228,6 +253,15 @@ async def handle_compose(task: Task) -> None:
             capped = sorted(relevant, key=lambda m: m.posted_at or _MIN_DT, reverse=True)
             capped = capped[: settings.NEWSMAKER_CAP]
             capped.sort(key=lambda m: m.posted_at or _MIN_DT)
+            n_news_batches = _n_batches(len(capped), settings.NEWSMAKER_BATCH)
+            run.stats = {
+                "collected": len(msgs),
+                "relevant": len(relevant),
+                "stage": "composing",
+                "stage_done": 0,
+                "stage_total": n_news_batches,
+            }
+            await db.commit()
             # Батчим: на большом входе reasoning-модель сжигает бюджет на размышления
             # и возвращает результат лишь по части сообщений. Порядок хронологический,
             # поэтому посты об одном событии обычно попадают в один батч.
@@ -237,9 +271,13 @@ async def handle_compose(task: Task) -> None:
                 payload_msgs = [
                     {"i": i, "source": m.source_key, "text": m.text} for i, m in enumerate(batch)
                 ]
-                for g in await provider.make_news(project.topic, payload_msgs):
+                for g in await provider.make_news(
+                    project.topic, payload_msgs, project.profile or ""
+                ):
                     # индексы внутри батча -> позиции в capped
                     groups.append({**g, "message_indices": [offset + i for i in g["message_indices"]]})
+                run.stats = {**run.stats, "stage_done": offset // settings.NEWSMAKER_BATCH + 1}
+                await db.commit()
 
             n_news = 0
             for g in groups:

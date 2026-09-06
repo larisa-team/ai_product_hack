@@ -19,11 +19,13 @@ from app.config import settings
 CLAIM_TTL_EXTRACT = 600
 CLAIM_TTL_COMPOSE = 1800
 
-# Воркер обновляет этот ключ на каждом тике поллинга (см. worker/loop.py). Если ключ
-# просрочен или отсутствует — воркер не пишет в Redis: либо упал, либо завис.
-# HEARTBEAT_TTL с запасом больше интервала поллинга.
+# Отдельная фоновая задача воркера обновляет этот ключ раз в HEARTBEAT_INTERVAL секунд
+# (см. worker/loop.py::_heartbeat) — независимо от того, какую задачу воркер сейчас крутит.
+# Так `/api/health` остаётся честным и на многоминутном compose с медленными LLM-вызовами.
+# Если ключ просрочен — процесс воркера мёртв или event loop заблокирован.
 WORKER_HEARTBEAT_KEY = "worker:heartbeat"
-HEARTBEAT_TTL = 15
+HEARTBEAT_INTERVAL = 5
+HEARTBEAT_TTL = 20
 
 _client: redis.Redis | None = None
 

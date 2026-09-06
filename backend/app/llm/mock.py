@@ -52,7 +52,12 @@ class MockProvider:
             return [True] * len(texts)
         return [bool(topic_lemmas & _lemmas(t)) for t in texts]
 
-    async def make_news(self, topic: str, messages: list[dict]) -> list[NewsGroup]:
+    async def make_news(
+        self, topic: str, messages: list[dict], profile: str = ""
+    ) -> list[NewsGroup]:
+        # profile влияет на importance только у реального провайдера; mock оставляет
+        # свою словарную эвристику — притворяться, что учитывает профиль, хуже.
+        _ = profile
         # группировка по совпадению первых 4 значимых слов сообщения
         by_key: dict[tuple[str, ...], list[int]] = {}
         for msg in messages:

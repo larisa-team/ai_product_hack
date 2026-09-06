@@ -35,8 +35,15 @@ class LLMProvider(Protocol):
         """Для каждого текста — относится ли он к теме мониторинга."""
         ...
 
-    async def make_news(self, topic: str, messages: list[dict]) -> list[NewsGroup]:
-        """Сгруппировать сообщения (`{i, channel, text}`) в новости и саммаризировать."""
+    async def make_news(
+        self, topic: str, messages: list[dict], profile: str = ""
+    ) -> list[NewsGroup]:
+        """Сгруппировать сообщения (`{i, channel, text}`) в новости и саммаризировать.
+
+        `profile` — необязательный профиль бизнеса-заказчика мониторинга; влияет только
+        на оценку `importance` (важность считается относительно этого бизнеса). Пусто —
+        оценивать по общей значимости для темы.
+        """
         ...
 
 

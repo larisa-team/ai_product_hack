@@ -48,3 +48,28 @@ async def test_make_news_groups_similar_messages(provider: MockProvider):
 
 async def test_make_news_empty_input(provider: MockProvider):
     assert await provider.make_news(topic="x", messages=[]) == []
+
+
+async def test_make_news_fills_enrichment(provider: MockProvider):
+    """Офлайн-обработка обязана давать те же поля, что и реальный LLM, иначе без ключа
+    половина чек-листа (категория/важность/сущности) выглядит пустой.
+    """
+    groups = await provider.make_news(
+        topic="регулирование",
+        messages=[
+            {"i": 0, "source": "a", "text": "Госдума приняла закон о штрафах за нарушение реестра ПО"},
+        ],
+    )
+    g = groups[0]
+    assert g["category"] == "регуляторика"  # «закон», «штраф», «реестр» -> регуляторика
+    assert g["doc_type"] == "npa"           # «закон» -> НПА
+    assert g["importance"] == "high"        # «штраф» -> высокая важность
+    assert set(g["entities"]) == {"who", "what", "when", "consequences"}
+
+
+async def test_make_news_default_category_is_trends(provider: MockProvider):
+    groups = await provider.make_news(
+        topic="технологии",
+        messages=[{"i": 0, "source": "a", "text": "Новая нейросеть рисует картинки лучше прежних"}],
+    )
+    assert groups[0]["category"] == "тренды"

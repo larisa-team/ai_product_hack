@@ -10,12 +10,10 @@
 | Пометка | Значение |
 |---|---|
 | ✅ | реализовано и проверено вживую |
-| 🔜 | проектируется в этом заходе (закрытие чек-листа организаторов) |
 | ⏭ | сознательно вне скоупа, см. §13 «Путь наращивания» |
 
-Документ описывает целевое состояние на защиту. Пункты 🔜 — это дизайн, под который пишется код,
-а не отчёт о сделанном; расхождение между 🔜 и кодом — нормально в процессе, но к защите пометки
-должны стать ✅ либо переехать в §13.
+Заход по чек-листу организаторов (источники → обогащение → редактирование → дашборд) выполнен
+и проверен вживую. §10 «Что было дописано в контракт» — журнал изменений по заходам.
 
 ---
 
@@ -130,7 +128,11 @@ CREATE TABLE projects (
   created_at TIMESTAMP NOT NULL,
   updated_at TIMESTAMP NOT NULL,
   filters JSONB NOT NULL DEFAULT '[]',   -- список monitoring.v1.ProjectFilter в proto3-JSON
-  sources JSONB NOT NULL DEFAULT '[]'    -- список monitoring.v1.Source в proto3-JSON
+  sources JSONB NOT NULL DEFAULT '[]',   -- список monitoring.v1.Source в proto3-JSON
+  collection_days INTEGER NOT NULL DEFAULT 7, -- глубина ПЕРВОГО сбора источника (дальше — курсор);
+                                             -- 0 трактуется как 7, диапазон 1..60
+  profile TEXT NOT NULL DEFAULT ''            -- профиль бизнеса-заказчика; уходит в промпт
+                                             -- саммаризации, важность считается по влиянию на него
 );
 
 CREATE TABLE runs (
@@ -138,38 +140,39 @@ CREATE TABLE runs (
   project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   state VARCHAR(50) NOT NULL DEFAULT 'RUN_STATE_STARTED',  -- имя значения enum RunState
   created_at TIMESTAMP NOT NULL,
-  stats JSONB NOT NULL DEFAULT '{}'      -- форма monitoring.v1.RunStats
+  stats JSONB NOT NULL DEFAULT '{}'      -- форма monitoring.v1.RunStats; во время обработки
+                                        -- несёт ещё stage / stage_done / stage_total (прогресс)
 );
 
--- Карточка события. 🔜 Обогащение (category/importance/doc_type/entities/tags),
--- project_id и hidden добавляются в этом заходе.
+-- Карточка события. project_id денормализован (лента строится по проекту, а ручная
+-- карточка вообще без Run); category/importance/doc_type — строки с именем enum, как Run.state.
 CREATE TABLE news (
   id SERIAL PRIMARY KEY,
-  project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,  -- 🔜
-  run_id VARCHAR REFERENCES runs(id) ON DELETE CASCADE,   -- 🔜 NULL у карточек, добавленных руками
+  project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  run_id VARCHAR REFERENCES runs(id) ON DELETE CASCADE,   -- NULL у карточек, добавленных руками
   title TEXT NOT NULL,
   content TEXT NOT NULL,
   sources JSONB NOT NULL DEFAULT '[]',   -- ["https://t.me/ch/123", ...]
-  category   VARCHAR(40) NOT NULL DEFAULT 'NEWS_CATEGORY_UNSPECIFIED',    -- 🔜 имя значения enum
-  importance VARCHAR(40) NOT NULL DEFAULT 'NEWS_IMPORTANCE_UNSPECIFIED',  -- 🔜
-  doc_type   VARCHAR(30) NOT NULL DEFAULT 'DOC_TYPE_UNSPECIFIED',         -- 🔜
-  entities JSONB NOT NULL DEFAULT '{}',  -- 🔜 форма monitoring.v1.NewsEntities
-  tags     JSONB NOT NULL DEFAULT '[]',  -- 🔜
-  hidden BOOLEAN NOT NULL DEFAULT false, -- 🔜 скрыто из ленты, но не удалено
-  created_at TIMESTAMP NOT NULL DEFAULT now()  -- 🔜
+  category   VARCHAR(40) NOT NULL DEFAULT 'NEWS_CATEGORY_UNSPECIFIED',    -- имя значения enum
+  importance VARCHAR(40) NOT NULL DEFAULT 'NEWS_IMPORTANCE_UNSPECIFIED',
+  doc_type   VARCHAR(30) NOT NULL DEFAULT 'DOC_TYPE_UNSPECIFIED',       
+  entities JSONB NOT NULL DEFAULT '{}',  -- форма monitoring.v1.NewsEntities
+  tags     JSONB NOT NULL DEFAULT '[]',
+  hidden BOOLEAN NOT NULL DEFAULT false, -- скрыто из ленты, но не удалено
+  created_at TIMESTAMP NOT NULL DEFAULT now()
 );
-CREATE INDEX ix_news_project_id ON news (project_id);  -- 🔜 лента строится по проекту, не по Run
+CREATE INDEX ix_news_project_id ON news (project_id);  -- лента строится по проекту, не по Run
 
 -- Ниже — служебные таблицы, наружу в proto не выходят.
 
--- 🔜 channel -> source_key, tg_msg_id становится NULLABLE: одна таблица обслуживает
+-- channel -> source_key (обобщение под RSS), tg_msg_id становится NULLABLE: одна таблица обслуживает
 -- и Telegram (source_key = канал), и RSS (source_key = URL ленты).
 CREATE TABLE messages (
   id SERIAL PRIMARY KEY,
   project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   run_id     VARCHAR NOT NULL REFERENCES runs(id)     ON DELETE CASCADE,
-  source_key VARCHAR(255) NOT NULL,      -- 🔜 было channel
-  tg_msg_id BIGINT,                      -- 🔜 было NOT NULL; NULL для RSS
+  source_key VARCHAR(255) NOT NULL,      -- было channel
+  tg_msg_id BIGINT,                      -- было NOT NULL; NULL для RSS
   url TEXT NOT NULL,
   text TEXT NOT NULL,
   posted_at TIMESTAMP,
@@ -180,9 +183,9 @@ CREATE TABLE messages (
 
 CREATE TABLE source_cursors (
   project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  source_key VARCHAR(255) NOT NULL,      -- 🔜 было channel
+  source_key VARCHAR(255) NOT NULL,      -- было channel
   last_msg_id BIGINT,                    -- курсор Telegram
-  last_published_at TIMESTAMP,           -- 🔜 курсор RSS (у записей нет сквозного id)
+  last_published_at TIMESTAMP,           -- курсор RSS (у записей нет сквозного id)
   PRIMARY KEY (project_id, source_key)
 );
 
@@ -193,7 +196,7 @@ CREATE TABLE tasks (
   id VARCHAR PRIMARY KEY,
   run_id VARCHAR NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   kind VARCHAR(20) NOT NULL,             -- extract | compose
-  payload JSONB NOT NULL DEFAULT '{}',   -- 🔜 {"project_id","source_type","source_key"} для extract
+  payload JSONB NOT NULL DEFAULT '{}',   -- {"project_id","source_type","source_key","collection_days"} для extract
   status VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending | done
   created_at TIMESTAMP NOT NULL
 );
@@ -231,7 +234,7 @@ sequenceDiagram
     FE->>BE: POST /api/monitoring.v1.RunService/StartRun
     BE->>BE: INSERT runs(state=RUN_STATE_STARTED)
     loop по каждому активному источнику проекта
-        BE->>BE: INSERT tasks(kind=extract, payload={project,source_type,source_key})
+        BE->>BE: INSERT tasks(kind=extract, payload={project,source_type,source_key,collection_days})
     end
     BE-->>FE: StartRunResponse{run}
 
@@ -255,7 +258,9 @@ sequenceDiagram
         W->>W: runs.state=RUN_STATE_DONE, stats={collected:0,...}
     else
         W->>LLM: message-filter, батчи по FILTER_BATCH -> relevant true/false
+        W->>W: run.stats.stage/stage_done обновляется после каждого батча (commit)
         W->>LLM: news-maker, батчи по NEWSMAKER_BATCH -> группы + саммари + обогащение
+        W->>W: run.stats.stage/stage_done обновляется после каждого батча (commit)
         W->>W: INSERT news(project_id, sources, category, importance, doc_type, entities)
         W->>W: runs.state=RUN_STATE_DONE, stats={collected, relevant, news}
     end
@@ -275,7 +280,7 @@ sequenceDiagram
 | Ключ | Тип | Назначение |
 |---|---|---|
 | `claim:{job_id}` | string, `SET NX EX ttl` | «взято в работу» — несколько воркеров могут выбрать одну и ту же pending-строку из `tasks` (обычный `SELECT`, без блокировки); claim решает, кто её реально исполняет. `ttl` = `CLAIM_TTL_EXTRACT` (600с) или `CLAIM_TTL_COMPOSE` (1800с) |
-| `worker:heartbeat` | string, `SET EX 15` | обновляется на каждом тике поллинга; `/api/health` считает воркер живым, пока ключ не истёк |
+| `worker:heartbeat` | string, `SET EX 20` (`HEARTBEAT_TTL`) | обновляется отдельной фоновой задачей `_heartbeat` раз в 5 с (`HEARTBEAT_INTERVAL`), независимо от того, какую задачу крутит воркер; `/api/health` считает воркер живым, пока ключ не истёк |
 
 `job_id`: `"{run_id}:{source_key}"` для extract, `"compose:{run_id}"` для compose.
 
@@ -287,10 +292,22 @@ sequenceDiagram
   обработка продолжится, как только Redis вернётся;
 - один источник недоступен (канал без веб-превью, отвалившаяся лента) → ошибка изолирована в его
   extract-задаче: `msgs = []`, предупреждение в лог, остальные источники прогона отрабатывают;
-- «завис» Run (в `RUN_STATE_STARTED` дольше 90 с) → фронт показывает баннер с кнопкой перезапуска;
+- «завис» Run → фронт показывает баннер с кнопкой перезапуска. Детекция по остановке
+  прогресса, а не по таймеру: прогресс (`RunStats.stage_done`) не двигался ~4 мин, либо
+  обработка так и не дошла до первого этапа за ~3 мин;
 - ошибка LLM в compose → `RUN_STATE_FAILED`, `stats.error`, новости не создаются;
 - сетевая ошибка/429/5xx к LLM → ретрай с экспоненциальной паузой (1/2/4 с), отдельно от ретрая
-  на невалидный JSON.
+  на невалидный JSON;
+- `DeleteProject` во время активного прогона → Postgres ловит дедлок (каскадное удаление
+  vs `UPDATE runs` из compose) и снимает одну транзакцию; воркер ловит исключение, пишет в
+  лог и продолжает следующий тик. Затронутый прогон остаётся в `RUN_STATE_STARTED`, но его
+  проект уже удалён.
+- **Дрейф часов WSL2-VM** (окружение разработки): часы контейнеров периодически скачут на ~1ч
+  и назад. Redis-ключ `worker:heartbeat` с TTL при скачке вперёд немедленно «протухает» →
+  `/api/health` кратко показывает `worker: false`, хотя воркер жив. Не баг кода, лечится
+  `wsl --shutdown` из Windows. **UI на это не завязан** — баннер «обработка застряла» на
+  фронте срабатывает по остановке прогресса (`RunStats.stage_done` не двигается несколько
+  минут), а не по `/api/health`.
 
 ---
 
@@ -302,7 +319,7 @@ sequenceDiagram
 | Тип | `source_key` | Коннектор | Курсор |
 |---|---|---|---|
 | `SOURCE_TYPE_TELEGRAM` ✅ | имя канала (`cit_gov`) | `app/ingestion/telegram_web.py` — публичное веб-превью `t.me/s/<channel>`, без ключей и авторизации, пагинация `?before=<id>` | `last_msg_id` |
-| `SOURCE_TYPE_RSS` 🔜 | URL ленты | `app/ingestion/rss.py` — `httpx` + `feedparser`, HTML в описании чистится `selectolax` | `last_published_at` |
+| `SOURCE_TYPE_RSS` ✅ | URL ленты | `app/ingestion/rss.py` — `httpx` + `feedparser`, HTML в описании чистится `selectolax` | `last_published_at` |
 
 Оба коннектора возвращают однородный список записей с полями `url`, `text`, `posted_at`,
 `content_hash`; дальше конвейер не различает, откуда материал пришёл. Дедупликация —
@@ -344,8 +361,23 @@ sequenceDiagram
 Провайдер за абстракцией `app/llm/provider.py`, `LLM_PROVIDER = openai_compat | mock`.
 `openai_compat` рассчитан на OpenAI-совместимые API; используется **RouterAI**
 (`LLM_BASE_URL=https://routerai.ru/api/v1`, модель `deepseek/deepseek-v4-flash-0731`).
-Запрос — `response_format: {"type":"json_object"}`, починка JSON с ретраем ×3, отдельно —
-сетевой ретрай на транспортные ошибки и 429/5xx. Оффлайн-демо — на `mock`.
+Оффлайн-демо — на `mock`.
+
+**Форма ответа — три уровня подстраховки** (`_complete_json` в `openai_compat.py`):
+
+1. **strict `response_format: json_schema`** — схема (`_FILTER_SCHEMA` / `_NEWS_SCHEMA`)
+   ограничивает модель на генерации: `message_indices` гарантированно массив int,
+   `category`/`importance`/`doc_type` — только из `enum`, `entities` — ровно 4 ключа.
+2. **откат на `json_object`** — RouterAI проксирует ~490 моделей, и не все умеют `json_schema`
+   (`deepseek-v4-flash` через RouterAI — умеет, проверено вживую: лог
+   `LLM: strict json_schema поддерживается`). Первый же `400` на схему переводит **весь
+   процесс воркера** на `json_object` (`_json_schema_supported = False`) — больше не пробуем.
+3. **ленивый парсер + ретрай ×3** — `_loads_lenient` срезает markdown-заборы и вытаскивает
+   `{…}`; если 200 пришёл, но JSON всё равно кривой — просим модель починить (до 3 раз).
+
+Плюс `filter_relevance`/`make_news` читают каждое поле терпимо: пропуск или незнакомое
+значение → `*_UNSPECIFIED` (перевод в `app/llm/schema.py`), но прогон не падает.
+Отдельно — сетевой ретрай на транспортные ошибки и 429/5xx (`_post_with_retry`).
 
 ### message-filter (батч `FILTER_BATCH` = 30) ✅
 
@@ -359,18 +391,21 @@ schema: {"results":[{"i":int,"relevant":bool}]}
 
 `mock`: `relevant = любая лемма из topic присутствует в тексте` (pymorphy3).
 
-### news-maker (батчи `NEWSMAKER_BATCH` = 12, вход обрезан до `NEWSMAKER_CAP` свежих) ✅ + 🔜 обогащение
+### news-maker (батчи `NEWSMAKER_BATCH` = 12, вход обрезан до `NEWSMAKER_CAP` свежих) ✅
 
 ```
 system: Сгруппируй сообщения об одном и том же событии и сделай из каждой группы новость.
-        Тема мониторинга: «{topic}». Заголовок — короткий, content — 3–5 предложений по сути.
+        Тема мониторинга: «{topic}». [Профиль бизнеса-заказчика: «{profile}» — если задан.]
+        Заголовок — короткий, content — 3–5 предложений по сути.
         Плюс для каждой группы: категория, важность, тип документа и сущности. Только JSON.
-user:   [{"i":0,"channel":"...","text":"..."}, ...]
+        importance: high — прямое влияние на бизнес (НПА, штрафы/суд, кризис, ход прямого
+        конкурента); medium — косвенное/отложенное; low — фон. Оценивается по влиянию на профиль.
+user:   [{"i":0,"source":"...","text":"..."}, ...]
 schema: {"news":[{"title":str, "content":str, "message_indices":[int],
-                  "category":"регуляторика|репутация|конкуренты|тренды",   // 🔜
-                  "importance":"high|medium|low",                          // 🔜
-                  "doc_type":"npa|news",                                    // 🔜
-                  "entities":{"who":str,"what":str,"when":str,"consequences":str}}]}  // 🔜
+                  "category":"регуляторика|репутация|конкуренты|тренды",
+                  "importance":"high|medium|low",
+                  "doc_type":"npa|news",
+                  "entities":{"who":str,"what":str,"when":str,"consequences":str}}]}
 ```
 
 Схема ответа соответствует решению Р5 из `REQUIREMENTS.md` — минимальный structured output,
@@ -384,17 +419,24 @@ schema: {"news":[{"title":str, "content":str, "message_indices":[int],
 батча сдвигаем обратно в общий список. Замер на 6 каналах: было `relevant 28 → news 1`, стало
 `relevant 29 → news 27`.
 
-**Перевод значений LLM в enum'ы контракта** 🔜 — в одном месте (`app/llm/schema.py`), чтобы
+**Важность — относительно бизнеса-заказчика.** `Project.profile` (свободный текст: чем
+занимается компания, ключевые риски) уходит в системный промпт `make_news`; `importance`
+оценивается по влиянию события на этот бизнес, а не по абстрактной значимости. Профиль пуст →
+оценка по общей значимости для темы (прод-путь так и работает, пока поле не заполнено). На
+размеченном датасете (`app/eval/enrichment.py`) профиль + явная рубрика high/medium/low подняли
+accuracy важности ~0.63 → ~0.78.
+
+**Перевод значений LLM в enum'ы контракта** — в одном месте (`app/llm/schema.py`), чтобы
 провайдеры говорили на языке предметной области (русские названия категорий, как в чек-листе), а
 контракт хранил канонические имена enum'ов. Неизвестное/битое значение → `*_UNSPECIFIED`, а не
 падение.
 
-**`entities.when` считается детерминированно** 🔜: если LLM вернул непустое значение — берём его
+**`entities.when` считается детерминированно:** если LLM вернул непустое значение — берём его
 (он может дать более информативное «вступает в силу с 1 марта»), иначе подставляем дату самого
 раннего сообщения группы, которая и так известна. Так поле корректно заполняется и на `mock`,
 который сущности извлекать не умеет.
 
-**`mock` без сети** 🔜: группировка по совпадению первых 4 слов; категория и важность — по
+**`mock` без сети:** группировка по совпадению первых 4 слов; категория и важность — по
 словарям ключевых слов через леммы (pymorphy3), `doc_type=npa` при словах «закон/приказ/
 постановление/указ/кодекс», иначе `news`. Грубо, но детерминированно и демонстрируемо офлайн.
 
@@ -420,9 +462,9 @@ Content-Type: application/json
 | `ProjectService.UpdateProject` | правка полей по `FieldMask`; **управление источниками** идёт сюда: `update_mask: ["sources"]` с новым массивом | ✅ |
 | `ProjectService.DeleteProject` | удалить проект (каскадом runs/news/messages/tasks) | ✅ |
 | `RunService.StartRun` / `GetRun` / `ListRuns` | запуск обновления и его результат | ✅ |
-| `NewsService.ListNews` | **лента проекта с фильтрами и поиском** | 🔜 |
-| `NewsService.UpdateNews` | правка карточки: заголовок, саммари, категория, важность, теги, скрытие | 🔜 |
-| `NewsService.CreateNews` | ручное добавление материала | 🔜 |
+| `NewsService.ListNews` | **лента проекта с фильтрами и поиском** | ✅ |
+| `NewsService.UpdateNews` | правка карточки: заголовок, саммари, категория, важность, теги, скрытие | ✅ |
+| `NewsService.CreateNews` | ручное добавление материала | ✅ |
 
 Плюс служебный `GET /api/health` — вне контракта, инфраструктурный (БД, Redis, живость воркера,
 реестр зарегистрированных RPC).
@@ -430,7 +472,7 @@ Content-Type: application/json
 Коды ошибок Connect → HTTP: `invalid_argument` 400, `not_found` 404, `failed_precondition` 412,
 `unimplemented` 501, `internal` 500.
 
-### Фильтры и поиск (`ListNews`) 🔜
+### Фильтры и поиск (`ListNews`) ✅
 
 Фильтрация идёт по проекту, а не по одному прогону: `project_id` + категории (OR), важности (OR),
 источник, диапазон дат, текстовый запрос `q`, флаг `include_hidden` (по умолчанию скрытые не
@@ -440,10 +482,11 @@ Content-Type: application/json
 ```jsonc
 // CreateProject
 { "name": "ИТ-мониторинг", "topic": "цифровые технологии, гранты",
+  "collectionDays": 15,
   "filters": [{"prompt": "не интересны поздравления"}],
   "sources": [{"type": "SOURCE_TYPE_TELEGRAM", "telegram": "cit_gov", "label": "ЦИТ"},
-              {"type": "SOURCE_TYPE_RSS", "rssUrl": "https://www.cbr.ru/rss/RssPress",
-               "label": "Банк России (регулятор)"}] }
+              {"type": "SOURCE_TYPE_RSS", "rssUrl": "http://government.ru/all/rss/",
+               "label": "Правительство РФ (регулятор)"}] }
 
 // ListNews
 { "projectId": "...", "categories": ["NEWS_CATEGORY_REGULATORY"],
@@ -472,9 +515,9 @@ Content-Type: application/json
 
 | Путь | Экран | Содержимое | Статус |
 |---|---|---|---|
-| `/` | **Projects** | список проектов + форма создания: `name`, `topic`, текстовые фильтры, редактор источников (тип, канал/URL, ярлык, активность) | ✅ + 🔜 редактор источников |
-| `/projects/:id` | **Project** | данные проекта; редактирование источников; «Запустить обновление» → `StartRun` → polling `GetRun`; плашка `stats`; лента карточек с категорией, важностью, сущностями; правка и скрытие карточки | ✅ + 🔜 обогащение и правка |
-| `/projects/:id/news` | **Лента (дашборд)** | вся лента проекта с фильтрами (категория, важность, источник, даты) и поиском; ручное добавление материала | 🔜 |
+| `/` | **Projects** | список проектов + форма создания: `name`, `topic`, период первичного сбора (сутки / 7 / 15 / 30 дней), текстовые фильтры, редактор источников (тип, канал/URL, ярлык, активность) | ✅ |
+| `/projects/:id` | **Project** | данные проекта; редактирование источников и периода первичного сбора; «Запустить обновление» → `StartRun` → polling `GetRun` (кнопка заблокирована, пока прогон идёт); во время прогона — подпись этапа и прогресс-бар (`RunStats.stage` / `stage_done` / `stage_total`); плашка `stats`; лента карточек с категорией, важностью, сущностями; правка и скрытие карточки | ✅ |
+| `/projects/:id/news` | **Лента (дашборд)** | вся лента проекта с фильтрами (категория, важность, источник, даты) и поиском; ручное добавление материала | ✅ |
 | `/projects/:id/runs` | **Runs** | история запусков со `state` и `stats` | ✅ |
 
 Стек: React + Vite + TS, TanStack Query (polling и инвалидация кэша), Mantine.
@@ -482,8 +525,10 @@ Content-Type: application/json
 и `createPromiseClient(...)`. Типы `Project`, `Run`, `News`, `NewsCategory`, `SourceType` берутся
 из `src/gen/`, руками не пишутся.
 
-Если Run висит в `RUN_STATE_STARTED` дольше 90 с, показывается баннер «обработка идёт необычно
-долго» с кнопкой перезапуска — чтобы упавший воркер не выглядел как бесконечный спиннер. ✅
+Если прогресс прогона замер — этап (`RunStats.stage_done`) не двигался ~4 мин, либо обработка
+не дошла до первого этапа за ~3 мин — показывается баннер «обработка идёт дольше обычного» с
+кнопкой перезапуска, чтобы упавший воркер не выглядел как бесконечный спиннер. Детекция
+клиентская, по остановке прогресса, `/api/health` в ней не участвует. ✅
 
 ---
 
@@ -499,10 +544,14 @@ Content-Type: application/json
 | `DEBUG` | `false` | уровень логов, echo SQL |
 | `LLM_PROVIDER` | `mock` | `openai_compat` \| `mock` |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | — | для `openai_compat` (RouterAI) |
-| `TG_FETCH_LIMIT` / `TG_FETCH_DAYS` | `100` / `7` | лимит и глубина чтения Telegram-канала |
-| `RSS_FETCH_LIMIT` / `RSS_FETCH_DAYS` 🔜 | `50` / `7` | то же для RSS-лент |
+| `TG_FETCH_LIMIT` / `TG_FETCH_DAYS` | `100` / `7` | лимит постов и глубина **повторного** чтения Telegram-канала (инкрементальный догон по курсору) |
+| `RSS_FETCH_LIMIT` / `RSS_FETCH_DAYS` ✅ | `50` / `7` | то же для RSS-лент |
 | `FILTER_BATCH` | `30` | размер батча message-filter |
 | `NEWSMAKER_CAP` / `NEWSMAKER_BATCH` | `100` / `12` | вход news-maker: обрезка и размер батча |
+
+Глубину **первого** сбора источника задаёт не ENV, а поле проекта `Project.collection_days`
+(мастер создания, пресеты сутки / 7 / 15 / 30 дней) — оно едет в payload extract-задачи.
+`*_FETCH_DAYS` применяются, только когда у источника уже есть курсор.
 
 ```
 postgres:  postgres:16-alpine, том pgdata, healthcheck pg_isready
@@ -563,7 +612,7 @@ message Run {
 }
 ```
 
-**Заход 2, фаза A — источники разных типов** 🔜
+**Заход 2, фаза A — источники разных типов** ✅
 
 ```proto
 enum SourceType {
@@ -581,7 +630,7 @@ message Source {
 }
 ```
 
-**Заход 2, фаза B — обогащение карточки** 🔜
+**Заход 2, фаза B — обогащение карточки** ✅
 
 ```proto
 enum NewsCategory {          // NEW — категоризация из чек-листа
@@ -626,7 +675,7 @@ message News {
 }
 ```
 
-**Заход 2, фазы C–D — управление данными и лента** 🔜
+**Заход 2, фазы C–D — управление данными и лента** ✅
 
 ```proto
 service NewsService {                          // NEW
@@ -640,8 +689,8 @@ message ListNewsRequest {
   repeated NewsCategory categories = 2;      // OR-фильтр; пусто = все
   repeated NewsImportance importances = 3;   // OR-фильтр; пусто = все
   string source = 4;                          // точное совпадение с элементом News.sources
-  google.protobuf.Timestamp from = 5;
-  google.protobuf.Timestamp to = 6;
+  google.protobuf.Timestamp published_from = 5; // не `from` — ключевое слово Python, генератор
+  google.protobuf.Timestamp published_to = 6;   //   оставляет его как есть → префикс
   string q = 7;                                // текстовый поиск по title + content
   bool include_hidden = 8;
   int32 page_size = 9;
@@ -664,6 +713,54 @@ message UpdateNewsRequest {
 источника — это `UpdateProject` с `update_mask: ["sources"]` и новым массивом. На масштабе
 «несколько источников в проекте» это проще, чем `Source.id` + три отдельных RPC.
 
+**Заход 3 — период сбора на уровне проекта + прогресс обработки** ✅
+
+```proto
+message Project {
+  ...
+  int32 collection_days = 8;   // NEW — глубина ПЕРВОГО сбора источника (дальше — курсор), 1..60
+}
+message CreateProjectRequest { ...  int32 collection_days = 5; }   // NEW
+message UpdateProjectRequest { ...  int32 collection_days = 7; }   // NEW (в UPDATABLE)
+
+message RunStats {
+  int32 collected = 1;
+  int32 relevant = 2;
+  int32 news = 3;
+  string error = 4;
+  string stage = 5;        // NEW — "filtering" | "composing"; пусто на терминальном состоянии
+  int32 stage_done = 6;    // NEW — батч X из ...
+  int32 stage_total = 7;   // NEW
+}
+```
+
+`RunStats` расширен, а не заведено `RunProgress`: `run.stats` уже JSONB, `stats_to_pb` уже
+`ParseDict(ignore_unknown_fields=True)` — ноль плюмбинга. Воркер (`handle_compose`) переписывает
+`run.stats` после каждого батча filter/news-maker и коммитит — фронт поллит `GetRun` и рисует
+полосу. Терминальные ветки пишут stats без `stage`.
+
+Заодно починен heartbeat: `worker/loop.py` трогал ключ только между задачами, а один
+LLM-вызов легко идёт >15с → `/api/health` врал `worker: false` весь compose. Теперь пульс —
+отдельная фоновая задача (`_heartbeat`, раз в `HEARTBEAT_INTERVAL`=5с, TTL 20с), не зависит
+от того, какую задачу воркер крутит.
+
+**Заход 4 — профиль бизнеса-заказчика для оценки важности** ✅
+
+```proto
+message Project {
+  ...
+  string profile = 9;   // NEW — чем занимается бизнес, ключевые риски; уходит в промпт
+                          //   саммаризации, importance оценивается по влиянию на этот бизнес
+}
+message CreateProjectRequest { ...  string profile = 6; }   // NEW
+message UpdateProjectRequest { ...  string profile = 8; }   // NEW (в UPDATABLE)
+```
+
+Поле provider-метода, а не только контракта: `LLMProvider.make_news(topic, messages, profile="")`.
+Прод (`handle_compose`) передаёт `project.profile`; пусто → промпт без блока профиля, поведение
+как раньше. Плюс в `_NEWS_SYS` добавлена полная рубрика importance (было определено только
+`high`). Измерено на `app/eval/enrichment.py`: importance ~0.63 → ~0.78, category ~0.87 → ~0.90.
+
 ### Подводные камни proto3 (найденные в этом проекте)
 
 | Место | Проблема | Решение |
@@ -681,20 +778,21 @@ message UpdateNewsRequest {
 
 | Требование чек-листа | Как закрыто | Статус |
 |---|---|---|
-| Сбор минимум из 5 источников разных типов | 2 RSS СМИ + 1 RSS регулятора + 2 Telegram-канала, §5 | 🔜 |
-| Три категории источников (СМИ / регуляторы / Telegram) | RSS-коннектор для СМИ и регуляторов, `t.me/s/` для Telegram; категория — `Source.label` | 🔜 |
+| Сбор минимум из 5 источников разных типов | 2 RSS СМИ + 1 RSS регулятора + 2 Telegram-канала, §5 | ✅ |
+| Три категории источников (СМИ / регуляторы / Telegram) | RSS-коннектор для СМИ и регуляторов, `t.me/s/` для Telegram; категория — `Source.label` | ✅ |
 | Автоматическая саммаризация ≥10 материалов | news-maker, 3–5 предложений на карточку, батчами; на демо-проекте — десятки материалов | ✅ |
-| Дашборд с фильтрацией и поиском | `NewsService.ListNews` + экран `/projects/:id/news`, §7–8 | 🔜 |
-| Добавление, редактирование, удаление источников | редактор источников на фронте → `UpdateProject` с маской `sources`; пауза через `disabled` | 🔜 |
-| Редактирование метаданных и саммари публикаций | `NewsService.UpdateNews` + модалка правки | 🔜 |
-| Саммари 3–5 предложений + сущности (кто/что/когда/последствия) | схема news-maker по решению Р5, §6 | ✅ саммари / 🔜 сущности |
-| Категоризация (регуляторика / репутация / конкуренты / тренды) | `NewsCategory`, заполняется news-maker'ом | 🔜 |
-| Приоритизация (высокая / средняя / низкая) | `NewsImportance`, отображается бейджем, доступна как фильтр | 🔜 |
-| Добавление источника по URL | RSS-источник задаётся URL'ом в редакторе источников | 🔜 |
-| Редактирование заголовка, саммари, категории, приоритета, тегов | `UpdateNews` с `FieldMask` | 🔜 |
-| Удаление/скрытие источника или публикации | `News.hidden`, `Source.disabled` — скрытие без потери данных | 🔜 |
-| Ручное добавление материала | `NewsService.CreateNews` (`run_id` пустой) | 🔜 |
+| Дашборд с фильтрацией и поиском | `NewsService.ListNews` + экран `/projects/:id/news`, §7–8 | ✅ |
+| Добавление, редактирование, удаление источников | редактор источников на фронте → `UpdateProject` с маской `sources`; пауза через `disabled` | ✅ |
+| Редактирование метаданных и саммари публикаций | `NewsService.UpdateNews` + модалка правки | ✅ |
+| Саммари 3–5 предложений + сущности (кто/что/когда/последствия) | схема news-maker по решению Р5, §6 | ✅ |
+| Категоризация (регуляторика / репутация / конкуренты / тренды) | `NewsCategory`, заполняется news-maker'ом | ✅ |
+| Приоритизация (высокая / средняя / низкая) | `NewsImportance`, отображается бейджем, доступна как фильтр | ✅ |
+| Добавление источника по URL | RSS-источник задаётся URL'ом в редакторе источников | ✅ |
+| Редактирование заголовка, саммари, категории, приоритета, тегов | `UpdateNews` с `FieldMask` | ✅ |
+| Удаление/скрытие источника или публикации | `News.hidden`, `Source.disabled` — скрытие без потери данных | ✅ |
+| Ручное добавление материала | `NewsService.CreateNews` (`run_id` пустой) | ✅ |
 | Метрика: обработано / релевантно / отсеяно | `RunStats` (`collected`/`relevant`/`news`) на плашке прогона | ✅ |
+| Выбор периода первичного сбора (сутки / 7 / 15 дней) | `Project.collection_days`, пресеты в мастере создания и в карточке проекта (§5, §9) | ✅ |
 
 Инженерные проверки:
 
@@ -705,9 +803,12 @@ message UpdateNewsRequest {
 - [x] `make smoke` — сквозной прогон `CreateProject → StartRun → GetRun == DONE`
 - [x] `/api/health` показывает БД, Redis и живость воркера
 - [x] `--scale worker=2` не даёт дублей (claim + уникальный индекс на compose-задачу)
-- [ ] 🔜 прогон с источниками обоих типов в одном Run
-- [ ] 🔜 карточка с категорией, важностью и сущностями; правка карточки переживает новый Run
-- [ ] 🔜 фильтры и поиск по ленте возвращают корректное подмножество
+- [x] прогон с источниками обоих типов в одном Run (6 источников → 111 материалов)
+- [x] карточка с категорией/важностью/сущностями от LLM; правка переживает новый Run
+- [x] фильтры и поиск по ленте возвращают корректное подмножество
+- [x] строгий `response_format: json_schema` с откатом на `json_object` и ленивым парсером (§6)
+- [x] индикатор прогресса: `RunStats.stage`/`stage_done`/`stage_total` пишутся по батчам,
+      фронт рисует полосу; баннер «завис» — по остановке прогресса, не по `/api/health`
 
 ---
 

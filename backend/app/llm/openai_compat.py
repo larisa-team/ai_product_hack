@@ -17,6 +17,91 @@ log = logging.getLogger(__name__)
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _NETWORK_RETRIES = 3
 
+# Поддерживает ли текущий эндпоинт+модель strict `response_format: json_schema`.
+# None — ещё не проверяли; False — не поддерживает, дальше только `json_object`.
+# RouterAI проксирует ~490 моделей, и часть (в т.ч. deepseek-v4-flash) json_schema не умеет —
+# первый же 400 переводит процесс на json_object и больше не пробует.
+_json_schema_supported: bool | None = None
+
+
+def _reset_json_schema_support() -> None:
+    """Только для тестов: сбросить кэш определения поддержки json_schema."""
+    global _json_schema_supported
+    _json_schema_supported = None
+
+
+# strict-схемы под два вызова. Требования strict-режима: additionalProperties=false и все
+# поля в required на каждом объекте. Значения category/importance/doc_type ограничены
+# прямо здесь — модель не сможет придумать своё, меньше *_UNSPECIFIED-фолбэков.
+_FILTER_SCHEMA = {
+    "name": "relevance",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["results"],
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["i", "relevant"],
+                    "properties": {
+                        "i": {"type": "integer"},
+                        "relevant": {"type": "boolean"},
+                    },
+                },
+            }
+        },
+    },
+}
+
+_NEWS_SCHEMA = {
+    "name": "news",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["news"],
+        "properties": {
+            "news": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "title", "content", "message_indices",
+                        "category", "importance", "doc_type", "entities",
+                    ],
+                    "properties": {
+                        "title": {"type": "string"},
+                        "content": {"type": "string"},
+                        "message_indices": {"type": "array", "items": {"type": "integer"}},
+                        "category": {
+                            "type": "string",
+                            "enum": ["регуляторика", "репутация", "конкуренты", "тренды"],
+                        },
+                        "importance": {"type": "string", "enum": ["high", "medium", "low"]},
+                        "doc_type": {"type": "string", "enum": ["npa", "news"]},
+                        "entities": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["who", "what", "when", "consequences"],
+                            "properties": {
+                                "who": {"type": "string"},
+                                "what": {"type": "string"},
+                                "when": {"type": "string"},
+                                "consequences": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            }
+        },
+    },
+}
+
 _FILTER_SYS = (
     "Ты фильтр релевантности для мониторинга темы «{topic}».\n"
     "{extra}"
@@ -29,12 +114,19 @@ _FILTER_SYS = (
 _NEWS_SYS = (
     "Ты аналитик темы «{topic}». Тебе дан JSON-массив сообщений из СМИ, сайтов регуляторов "
     "и Telegram-каналов.\n"
+    "{profile_block}"
     "Сгруппируй сообщения, относящиеся к ОДНОМУ И ТОМУ ЖЕ событию, и для каждой группы составь "
     "одну новость: короткий конкретный заголовок и текст в 3–5 предложений по сути события.\n"
     "Для каждой группы также определи:\n"
     "  category — одно из: регуляторика | репутация | конкуренты | тренды;\n"
-    "  importance — одно из: high | medium | low (high — если есть риск штрафов, проверок, "
-    "суда, отзыва лицензии, кризис или вступающее в силу требование);\n"
+    "  importance — одно из: high | medium | low, по влиянию события на бизнес-заказчика:\n"
+    "    high — прямое и требующее реакции: новое или вступающее в силу требование НПА, "
+    "риск штрафов/проверок/суда/отзыва лицензии, репутационный кризис, крупный ход прямого "
+    "конкурента (сделка, слияние, уход игрока), изменение на ключевом для бизнеса рынке;\n"
+    "    medium — косвенное или отложенное: законопроект/инициатива на ранней стадии, "
+    "отраслевой тренд, ход небольшого игрока или в смежном сегменте, событие, которое "
+    "затронет бизнес не сразу;\n"
+    "    low — фоновая информация: знать полезно, но реакции не требует;\n"
     "  doc_type — npa для нормативно-правового акта, news для новостной статьи;\n"
     "  entities — кто (who), что (what), когда (when), последствия (consequences); "
     "если чего-то в тексте нет, оставь пустую строку, не выдумывай.\n"
@@ -64,7 +156,7 @@ class OpenAICompatProvider:
         extra_line = f"Дополнительно от пользователя: {extra}.\n" if extra else ""
         system = _FILTER_SYS.format(topic=topic, extra=extra_line)
         user = json.dumps([{"i": i, "text": t} for i, t in enumerate(texts)], ensure_ascii=False)
-        data = await self._complete_json(system, user)
+        data = await self._complete_json(system, user, json_schema=_FILTER_SCHEMA)
         flags = [False] * len(texts)
         for row in data.get("results", []):
             i = row.get("i")
@@ -72,10 +164,18 @@ class OpenAICompatProvider:
                 flags[i] = bool(row.get("relevant"))
         return flags
 
-    async def make_news(self, topic: str, messages: list[dict]) -> list[NewsGroup]:
-        system = _NEWS_SYS.format(topic=topic)
+    async def make_news(
+        self, topic: str, messages: list[dict], profile: str = ""
+    ) -> list[NewsGroup]:
+        profile_block = (
+            f"Профиль бизнеса-заказчика мониторинга: {profile.strip()}\n"
+            "Важность события оценивай по влиянию именно на этот бизнес.\n"
+            if profile.strip()
+            else ""
+        )
+        system = _NEWS_SYS.format(topic=topic, profile_block=profile_block)
         user = json.dumps(messages, ensure_ascii=False)
-        data = await self._complete_json(system, user)
+        data = await self._complete_json(system, user, json_schema=_NEWS_SCHEMA)
         out: list[NewsGroup] = []
         n = len(messages)
         for row in data.get("news", []):
@@ -102,26 +202,65 @@ class OpenAICompatProvider:
 
     # --- внутреннее ---
 
-    async def _complete_json(self, system: str, user: str) -> dict[str, Any]:
+    async def _complete_json(
+        self,
+        system: str,
+        user: str,
+        *,
+        json_schema: dict[str, Any],
+        client: httpx.AsyncClient | None = None,
+    ) -> dict[str, Any]:
+        """Запрос к LLM с strict json_schema и откатом на json_object.
+
+        Три уровня подстраховки формы ответа:
+          1. `response_format: json_schema` — модель ограничена схемой на генерации;
+          2. если эндпоинт её не принял (400) — `json_object` до конца процесса;
+          3. `_loads_lenient` + ретрай ×3 на «почини JSON» — на случай, когда 200 пришёл,
+             но форма всё равно кривая (json_object этого не гарантирует).
+        Плюс поля читаются терпимо в `filter_relevance`/`make_news` — пропуск не роняет прогон.
+        """
+        global _json_schema_supported
+
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "response_format": {"type": "json_object"},
-            "temperature": 0.2,
-        }
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        url = f"{self.base_url}/chat/completions"
 
-        async with httpx.AsyncClient(timeout=180) as client:
+        owns_client = client is None
+        client = client or httpx.AsyncClient(timeout=180)
+        try:
             for attempt in range(3):
-                resp = await _post_with_retry(
-                    client, f"{self.base_url}/chat/completions", payload, headers
+                use_schema = _json_schema_supported is not False
+                response_format = (
+                    {"type": "json_schema", "json_schema": json_schema}
+                    if use_schema
+                    else {"type": "json_object"}
                 )
+                payload = {
+                    "model": self.model,
+                    "messages": messages,
+                    "response_format": response_format,
+                    "temperature": 0.2,
+                }
+                try:
+                    resp = await _post_with_retry(client, url, payload, headers)
+                except httpx.HTTPStatusError as exc:
+                    if use_schema and exc.response.status_code == 400:
+                        log.warning(
+                            "LLM не принял json_schema — откат на json_object: %s",
+                            exc.response.text[:200],
+                        )
+                        _json_schema_supported = False
+                        continue  # тот же виток, но уже json_object
+                    raise
+                if use_schema and _json_schema_supported is None:
+                    _json_schema_supported = True
+                    log.info("LLM: strict json_schema поддерживается")
+
                 content = resp.json()["choices"][0]["message"]["content"]
                 try:
                     parsed = _loads_lenient(content)
@@ -134,7 +273,10 @@ class OpenAICompatProvider:
                     messages.append(
                         {"role": "user", "content": "Верни ТОЛЬКО валидный JSON, без markdown."}
                     )
-        raise RuntimeError("LLM не вернул валидный JSON после 3 попыток")
+            raise RuntimeError("LLM не вернул валидный JSON после 3 попыток")
+        finally:
+            if owns_client:
+                await client.aclose()
 
 
 async def _post_with_retry(

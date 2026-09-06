@@ -73,6 +73,23 @@ def test_source_without_disabled_is_active():
     assert source.disabled is False
 
 
+def test_project_carries_profile():
+    """Профиль бизнеса-заказчика — часть контракта Project и обеих Request-форм.
+
+    Важность события LLM оценивает относительно этого профиля; без поля она считалась бы
+    «в вакууме» (см. docs/improve.md).
+    """
+    assert "profile" in pb.Project.DESCRIPTOR.fields_by_name
+    assert "profile" in pb.CreateProjectRequest.DESCRIPTOR.fields_by_name
+    assert "profile" in pb.UpdateProjectRequest.DESCRIPTOR.fields_by_name
+    req = json_format.Parse(
+        '{"name": "x", "topic": "y", "profile": "вендор корпоративного ПО"}',
+        pb.CreateProjectRequest(),
+        ignore_unknown_fields=False,
+    )
+    assert req.profile == "вендор корпоративного ПО"
+
+
 def test_update_news_mask_distinguishes_unhide_from_absent():
     """«Показать скрытую новость» выразимо только через маску.
 

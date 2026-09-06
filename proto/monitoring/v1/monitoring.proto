@@ -84,6 +84,13 @@ message Project {
   repeated Source sources = 5;
   google.protobuf.Timestamp created_at = 6;
   google.protobuf.Timestamp updated_at = 7;
+  // За сколько дней собирать материалы при ПЕРВОМ сборе источника. Дальше рулит
+  // инкрементальный курсор. 0 = дефолт (7). Диапазон 1..60.
+  int32 collection_days = 8;
+  // Профиль бизнеса-заказчика мониторинга (чем занимается, ключевые риски). Уходит
+  // в промпт саммаризации: важность события оценивается по влиянию именно на этот
+  // бизнес. Пусто — оценивать по общей значимости для темы.
+  string profile = 9;
 }
 
 message CreateProjectRequest {
@@ -91,6 +98,8 @@ message CreateProjectRequest {
   string topic = 2;
   repeated ProjectFilter filters = 3;
   repeated Source sources = 4;
+  int32 collection_days = 5;
+  string profile = 6;
 }
 
 message CreateProjectResponse {
@@ -128,6 +137,8 @@ message UpdateProjectRequest {
   repeated ProjectFilter filters = 4;
   repeated Source sources = 5;
   google.protobuf.FieldMask update_mask = 6;
+  int32 collection_days = 7;
+  string profile = 8;
 }
 
 message DeleteProjectRequest {
@@ -172,6 +183,11 @@ message RunStats {
   int32 news = 3;
   // Заполняется только при RUN_STATE_FAILED.
   string error = 4;
+  // Прогресс во время обработки (state == RUN_STATE_STARTED). На терминальном
+  // состоянии stage пустой. stage: "filtering" | "composing".
+  string stage = 5;
+  int32 stage_done = 6;
+  int32 stage_total = 7;
 }
 
 message Run {
@@ -221,8 +237,10 @@ message ListNewsRequest {
   repeated NewsImportance importances = 3;
   // Точное совпадение с одним из News.sources.
   string source = 4;
-  google.protobuf.Timestamp from = 5;
-  google.protobuf.Timestamp to = 6;
+  // Диапазон по News.created_at. `from`/`to` не используем — `from` это ключевое
+  // слово Python, а генератор оставляет его как есть.
+  google.protobuf.Timestamp published_from = 5;
+  google.protobuf.Timestamp published_to = 6;
   // Текстовый поиск по заголовку и содержимому.
   string q = 7;
   bool include_hidden = 8;

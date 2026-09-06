@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,18 +12,29 @@ from app.database.models import Task
 EXTRACT = "extract"
 COMPOSE = "compose"
 
+# Предикат частичного индекса uq_tasks_compose_per_run — дословно как в миграции.
+# Именно text(), а не (Task.kind == COMPOSE): SQLAlchemy 2.0.52 рендерит выражение как
+# bound-параметр (`WHERE kind = $1`), а Postgres сверяет ON CONFLICT с предикатом индекса
+# текстуально — параметр не совпадёт с литералом, и вставка упадёт
+# «no unique or exclusion constraint matching the ON CONFLICT specification».
+_COMPOSE_INDEX_WHERE = text("kind = 'compose'")
+
 
 class TaskRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
 
     def create_extract_tasks(
-        self, run_id: str, project_id: str, sources: list[dict[str, str]]
+        self,
+        run_id: str,
+        project_id: str,
+        sources: list[dict[str, str]],
+        collection_days: int = 7,
     ) -> None:
         """По задаче на источник. `sources` — [{"source_type": ..., "source_key": ...}].
 
-        Тип источника едет в payload, чтобы воркер не ходил повторно за проектом:
-        какой коннектор дёргать, видно прямо из задачи.
+        Тип источника и период сбора едут в payload, чтобы воркер не ходил повторно
+        за проектом: какой коннектор дёргать и на какую глубину — видно прямо из задачи.
         """
         for source in sources:
             self.db.add(
@@ -35,6 +46,7 @@ class TaskRepository:
                         "project_id": project_id,
                         "source_type": source["source_type"],
                         "source_key": source["source_key"],
+                        "collection_days": collection_days,
                     },
                 )
             )
@@ -63,6 +75,6 @@ class TaskRepository:
         stmt = (
             pg_insert(Task)
             .values(id=str(uuid.uuid4()), run_id=run_id, kind=COMPOSE, payload={})
-            .on_conflict_do_nothing(index_elements=["run_id"], index_where=(Task.kind == COMPOSE))
+            .on_conflict_do_nothing(index_elements=["run_id"], index_where=_COMPOSE_INDEX_WHERE)
         )
         await self.db.execute(stmt)
