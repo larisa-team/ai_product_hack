@@ -1,7 +1,9 @@
 :root {
   color: #111111;
   background: #f2f2f0;
-  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  --font-sans: Arial, Helvetica, sans-serif;
+  --font-mono: Consolas, "Courier New", monospace;
+  font-family: var(--font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -99,6 +101,19 @@ a {
 .topbar-nav a:hover,
 .topbar-nav a[aria-current="page"] {
   color: #111111;
+}
+
+.demo-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 11px;
+  border: 1px solid rgba(125, 105, 238, 0.35);
+  border-radius: 999px;
+  background: rgba(125, 105, 238, 0.11);
+  color: #5f4ed0;
+  font: 700 0.72rem/1 var(--font-mono);
+  letter-spacing: 0.08em;
 }
 
 .system-pill {
@@ -513,6 +528,7 @@ a {
 .metric-card {
   min-height: 148px;
   padding: 24px;
+  color: #f7f6f2;
   background: #111111;
 }
 
@@ -523,6 +539,7 @@ a {
 
 .metric-value {
   margin: 18px 0 2px;
+  color: inherit;
   font-size: clamp(2.2rem, 4vw, 4rem);
   font-weight: 850;
   letter-spacing: -0.07em;
@@ -539,6 +556,14 @@ a {
 
 .metric-card.accent .metric-label {
   color: rgba(17, 17, 17, 0.66);
+}
+
+.metric-card > .mantine-Text-root {
+  color: #aaa9a5 !important;
+}
+
+.metric-card.accent > .mantine-Text-root {
+  color: rgba(17, 17, 17, 0.7) !important;
 }
 
 .workspace-grid {

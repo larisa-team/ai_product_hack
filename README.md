@@ -21,6 +21,17 @@ make migrate     # применить миграции
 
 Открыть **http://localhost**.
 
+Только кликабельный frontend-демо режим — без Docker, backend и API-ключа:
+
+```bash
+cd frontend
+npm install
+npm run dev:demo
+```
+
+Открыть **http://localhost:5173**. Режим `DEMO · MOCK` использует встроенный
+сценарий и сохраняет тот же protobuf-контракт клиентских вызовов.
+
 ```bash
 curl localhost/api/health
 # {"status":"ok","db":true,"redis":true,"llm_provider":"mock","rpc":{...}}
