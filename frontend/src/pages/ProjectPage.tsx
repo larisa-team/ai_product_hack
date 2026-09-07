@@ -295,7 +295,15 @@ export default function ProjectPage() {
   const highPriority = visibleNews.filter((item) => item.importance === NewsImportance.HIGH && !item.hidden);
   const currentRun = run.data;
   const stats = currentRun?.stats;
-  const discarded = Math.max(0, (stats?.collected || 0) - (stats?.relevant || 0));
+  const latestRunIsEmpty = currentRun?.state === RunState.DONE && (stats?.collected ?? 0) === 0;
+  const lastContentRun = runs.data?.find((item) =>
+    item.id !== currentRun?.id && (item.stats?.collected ?? 0) > 0,
+  );
+  const displayStats = latestRunIsEmpty ? (lastContentRun?.stats ?? stats) : stats;
+  const discarded = Math.max(
+    0,
+    (displayStats?.collected || 0) - (displayStats?.relevant || 0),
+  );
 
   const running = currentRun?.state === RunState.STARTED;
   const stage = stats?.stage ?? "";
@@ -357,6 +365,12 @@ export default function ProjectPage() {
 
       {start.isError && <Alert color="red" mb="md">{(start.error as Error).message}</Alert>}
 
+      {latestRunIsEmpty && (
+        <Alert color="teal" variant="light" mb="md" title="Лента уже актуальна">
+          Новых публикаций после прошлого обновления нет. Показаны накопленная лента и метрики последнего содержательного запуска.
+        </Alert>
+      )}
+
       {workerDown && (
         <Alert color="orange" title="Обработчик недоступен" mb="md">
           Сервис <code>worker</code> не отвечает — новые запуски не обрабатываются.
@@ -375,10 +389,10 @@ export default function ProjectPage() {
       )}
 
       <section className="metric-grid" aria-label="Метрики последнего запуска">
-        <div className="metric-card accent"><div className="metric-label">Собрано</div><div className="metric-value">{stats?.collected ?? 0}</div><Text size="sm">публикаций</Text></div>
-        <div className="metric-card"><div className="metric-label">Релевантно</div><div className="metric-value">{stats?.relevant ?? 0}</div><Text size="sm" c="dimmed">прошли фильтр</Text></div>
+        <div className="metric-card accent"><div className="metric-label">Собрано</div><div className="metric-value">{displayStats?.collected ?? 0}</div><Text size="sm">публикаций</Text></div>
+        <div className="metric-card"><div className="metric-label">Релевантно</div><div className="metric-value">{displayStats?.relevant ?? 0}</div><Text size="sm" c="dimmed">прошли фильтр</Text></div>
         <div className="metric-card"><div className="metric-label">Шум</div><div className="metric-value">{discarded}</div><Text size="sm" c="dimmed">отсеяно</Text></div>
-        <div className="metric-card"><div className="metric-label">События</div><div className="metric-value">{stats?.news ?? visibleNews.length}</div><Text size="sm" c="dimmed">в ленте</Text></div>
+        <div className="metric-card"><div className="metric-label">События</div><div className="metric-value">{displayStats?.news ?? visibleNews.length}</div><Text size="sm" c="dimmed">в ленте</Text></div>
       </section>
 
       {currentRun?.stats?.error && <Alert color="red" mb="md">{currentRun.stats.error}</Alert>}

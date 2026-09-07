@@ -528,6 +528,7 @@ a {
 .metric-card {
   min-height: 148px;
   padding: 24px;
+  color: #f7f6f2;
   background: #111111;
 }
 
@@ -538,6 +539,7 @@ a {
 
 .metric-value {
   margin: 18px 0 2px;
+  color: inherit;
   font-size: clamp(2.2rem, 4vw, 4rem);
   font-weight: 850;
   letter-spacing: -0.07em;
@@ -554,6 +556,14 @@ a {
 
 .metric-card.accent .metric-label {
   color: rgba(17, 17, 17, 0.66);
+}
+
+.metric-card > .mantine-Text-root {
+  color: #aaa9a5 !important;
+}
+
+.metric-card.accent > .mantine-Text-root {
+  color: rgba(17, 17, 17, 0.7) !important;
 }
 
 .workspace-grid {
